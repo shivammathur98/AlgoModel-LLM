@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AlgoTrader.Application\AlgoTrader.Application.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Backtesting\AlgoTrader.Backtesting.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Broker\AlgoTrader.Broker.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Execution\AlgoTrader.Execution.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Infrastructure\AlgoTrader.Infrastructure.csproj" />
+    <ProjectReference Include="..\AlgoTrader.MarketData\AlgoTrader.MarketData.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Persistence\AlgoTrader.Persistence.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Risk\AlgoTrader.Risk.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Strategy\AlgoTrader.Strategy.csproj" />
+  </ItemGroup>
+
+</Project>

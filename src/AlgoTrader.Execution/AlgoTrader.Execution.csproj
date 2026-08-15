@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AlgoTrader.Execution</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AlgoTrader.Domain\AlgoTrader.Domain.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Application\AlgoTrader.Application.csproj" />
+  </ItemGroup>
+
+</Project>
