@@ -4,7 +4,7 @@ Production-oriented algorithmic trading platform for Indian NSE equity intraday 
 
 ## Current Status
 
-**PHASE 1 COMPLETE** — Solution foundation, configuration, safety gates, and operational endpoints.
+**PHASE 3 COMPLETE; PHASE 4 IN PROGRESS** — SQL persistence and a tested historical-data backfill pipeline are in place. The deterministic backtesting reporting/data-split foundation is next.
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the full 12-phase roadmap.
 
@@ -26,7 +26,7 @@ AlgoTrader.Api             ← Composition root, health/status endpoints
 - **Deterministic time**: All business logic uses `ISystemClock` (Domain/Common/ISystemClock.cs) for testability.
 - **Order state machine** (§25): Explicit transitions enforced in Domain/Enums/OrderEnums.cs with 40+ test cases.
 - **Kill switch** (§15): Thread-safe emergency stop (Application/Safety/KillSwitchService.cs) with event-based notifications.
-- **Broker abstraction**: Domain/Broker/ITradingBroker.cs defines the contract; Zerodha adapter arrives in Phase 9.
+- **Historical market data**: `KiteHistoricalDataProvider` maps the Kite candle API into UTC domain candles; `HistoricalCandleBackfillService` fetches bounded windows and persists idempotently.
 
 ## Quick Start
 
@@ -194,9 +194,9 @@ dotnet test AlgoTrader.sln --verbosity normal
 ```
 
 **Current test coverage:**
-- UnitTests: 92 tests (trading modes, order state transitions, safety validation, kill switch, options binding)
+- UnitTests: 109 tests (configuration/safety, persistence, candle backfill, and Kite historical mapping)
 - IntegrationTests: 3 tests (health/status endpoints via WebApplicationFactory)
-- BacktestingTests: 0 tests (empty, Phase 4)
+- BacktestingTests: 6 tests (metrics, data splits, conservative intrabar exits, next-candle fills, end-of-day exits, and slippage)
 
 ## Project Structure
 
@@ -236,24 +236,13 @@ AlgoTrader.sln
 
 ## What's Next
 
-### Phase 2: Domain Models & SQL Server Persistence
-- Entity Framework Core setup
-- Database migrations for core tables (Instrument, MarketCandle, MarketTick, Strategy, BacktestRun, Order, Position, RiskEvent, etc.)
-- Repository interfaces and implementations
-- Database seeding (NSE instrument master, trading calendar)
+### Phase 3: Historical Market Data Ingestion — complete
+- Kite historical API integration; response validation; UTC conversion; bounded, idempotent persistence
+- Candle storage supports 1m, 5m, 15m, and daily Kite intervals
 
-### Phase 3: Historical Market Data Ingestion
-- Kite historical API integration (IHistoricalDataProvider implementation)
-- Data pipeline: fetch → validate → deduplicate → persist
-- Candle storage with timeframes (1m, 5m, 15m, daily)
-- Backfill scripts for 2021-2026 data
-
-### Phase 4: Backtesting Engine
-- Event-driven backtesting framework
-- Signal generation → risk evaluation → simulated execution
-- Slippage and cost modeling
-- Backtest metrics (Sharpe, Sortino, drawdown, win rate, etc.)
-- Data splitting (train/validation/out-of-sample)
+### Phase 4: Backtesting Engine — in progress
+- Complete: deterministic event loop, next-candle fills, conservative stop/target handling, time/end-of-day exits, capital curve, drawdown, Sharpe/Sortino, slippage model, and data-split boundaries
+- Next batch: configurable position sizing and backtest-run persistence/replay metadata
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for phases 5-12.
 
@@ -299,4 +288,4 @@ Questions or issues? Open a GitHub issue or contact the maintainer.
 
 ---
 
-**Last updated**: Phase 1 complete (2026-08-15)
+**Last updated**: Phase 3 complete; Phase 4 reporting foundation (2026-08-15)

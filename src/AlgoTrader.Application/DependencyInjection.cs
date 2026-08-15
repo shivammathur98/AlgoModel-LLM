@@ -2,6 +2,7 @@ namespace AlgoTrader.Application;
 
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Safety;
+using AlgoTrader.Application.Services;
 using AlgoTrader.Application.Status;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -79,6 +80,7 @@ public static class DependencyInjection
         services.AddSingleton<LiveTradingSafetyValidator>();
         services.AddSingleton<IKillSwitch, KillSwitchService>();
         services.AddSingleton<ISystemStatusService, SystemStatusService>();
+        services.AddScoped<HistoricalCandleBackfillService>();
 
         return services;
     }

@@ -2,9 +2,11 @@ namespace AlgoTrader.Persistence.Entities;
 
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 
 /// <summary>Backtest execution record with aggregated metrics.</summary>
 [Table("BacktestRuns")]
+[Index(nameof(RunCorrelationId), IsUnique = true)]
 public class BacktestRunEntity
 {
     [Key]
@@ -12,15 +14,35 @@ public class BacktestRunEntity
 
     public long StrategyVersionId { get; set; }
 
+    [Required, StringLength(50)]
+    public string RunCorrelationId { get; set; } = string.Empty;
+
+    [Required, StringLength(64)]
+    public string ParametersHash { get; set; } = string.Empty;
+
+    [Required, StringLength(64)]
+    public string DataFingerprint { get; set; } = string.Empty;
+
+    [Required, StringLength(4000)]
+    public string Universe { get; set; } = string.Empty;
+
     public DateTimeOffset DataStartUtc { get; set; }
 
     public DateTimeOffset DataEndUtc { get; set; }
 
     public decimal InitialCapital { get; set; }
 
+    public decimal FinalCapital { get; set; }
+
     /// <summary>"Ideal", "Conservative", "Realistic".</summary>
     [StringLength(20)]
     public string ExecutionModel { get; set; } = string.Empty;
+
+    [Required, StringLength(100)]
+    public string CostModel { get; set; } = string.Empty;
+
+    [Required, StringLength(100)]
+    public string SlippageModel { get; set; } = string.Empty;
 
     public int TotalTrades { get; set; }
 
@@ -40,7 +62,7 @@ public class BacktestRunEntity
 
     public decimal MaxDrawdown { get; set; }
 
-    public decimal ProfitFactor { get; set; }
+    public decimal? ProfitFactor { get; set; }
 
     public decimal? SharpeRatio { get; set; }
 

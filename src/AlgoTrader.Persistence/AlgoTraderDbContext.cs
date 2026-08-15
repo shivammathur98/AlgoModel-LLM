@@ -2,6 +2,7 @@ namespace AlgoTrader.Persistence;
 
 using AlgoTrader.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 /// <summary>
 /// EF Core database context for the AlgoTrader platform.
@@ -54,5 +55,32 @@ public class AlgoTraderDbContext : DbContext
 
         // Apply all configurations from this assembly
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AlgoTraderDbContext).Assembly);
+
+        // SQLite doesn't support DateTimeOffset natively, so convert to string for storage
+        if (Database.ProviderName == "Microsoft.EntityFrameworkCore.Sqlite")
+        {
+            var dateTimeOffsetConverter = new ValueConverter<DateTimeOffset, string>(
+                v => v.ToString("O"),
+                v => DateTimeOffset.Parse(v));
+
+            var nullableDateTimeOffsetConverter = new ValueConverter<DateTimeOffset?, string?>(
+                v => v.HasValue ? v.Value.ToString("O") : null,
+                v => v != null ? DateTimeOffset.Parse(v) : null);
+
+            foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+            {
+                foreach (var property in entityType.GetProperties())
+                {
+                    if (property.ClrType == typeof(DateTimeOffset))
+                    {
+                        property.SetValueConverter(dateTimeOffsetConverter);
+                    }
+                    else if (property.ClrType == typeof(DateTimeOffset?))
+                    {
+                        property.SetValueConverter(nullableDateTimeOffsetConverter);
+                    }
+                }
+            }
+        }
     }
 }

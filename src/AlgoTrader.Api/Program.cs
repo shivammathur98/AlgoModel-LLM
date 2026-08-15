@@ -2,7 +2,9 @@ using AlgoTrader.Api.Endpoints;
 using AlgoTrader.Application;
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Safety;
+using AlgoTrader.Broker;
 using AlgoTrader.Infrastructure;
+using AlgoTrader.MarketData;
 using AlgoTrader.Persistence;
 using Microsoft.Extensions.Options;
 using Serilog;
@@ -26,6 +28,8 @@ try
     // Composition root: wire all layers
     builder.Services.AddAlgoTraderApplication(builder.Configuration);
     builder.Services.AddAlgoTraderInfrastructure();
+    builder.Services.AddAlgoTraderBroker();
+    builder.Services.AddAlgoTraderMarketData();
     builder.Services.AddAlgoTraderPersistence(builder.Configuration);
 
     // Health checks (§35)

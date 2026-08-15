@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\AlgoTrader.Backtesting\AlgoTrader.Backtesting.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Domain\AlgoTrader.Domain.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Application\AlgoTrader.Application.csproj" />
+    <ProjectReference Include="..\..\src\AlgoTrader.Risk\AlgoTrader.Risk.csproj" />
   </ItemGroup>
 
 </Project>

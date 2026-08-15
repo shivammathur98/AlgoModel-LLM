@@ -2,9 +2,9 @@
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "sk-ws-H.DMRXHIM.s46N.MEYCIQDbXsnR6RXErvdLVGRjkTqh_1uOJltGm-xn0VbqEEJbLgIhAMjm5ejNRkDAO_6VZ3JIygmvObWwsuP-9u1xzj_mtbzx",
     "ANTHROPIC_BASE_URL": "https://ws-krwhl1hbjkq9qxf4.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
-    "ANTHROPIC_MODEL": "qwen3.7-max-2026-05-20",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.7-max-2026-05-20",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.7-max-2026-05-20",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.7-max-2026-05-20"
+    "ANTHROPIC_MODEL": "qwen3.7-plus",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.7-plus",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.7-plus",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.7-plus"
   }
 }
