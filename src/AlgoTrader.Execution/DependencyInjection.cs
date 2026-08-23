@@ -1,6 +1,7 @@
 namespace AlgoTrader.Execution;
 
 using AlgoTrader.Application.Configuration;
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Domain.Broker;
@@ -28,7 +29,8 @@ public static class DependencyInjection
             sp.GetRequiredService<LiveTradingSafetyValidator>(),
             sp.GetRequiredService<IOrderRepository>(),
             sp.GetRequiredService<ISystemClock>(),
-            sp.GetRequiredService<ILogger<OrderExecutionEngine>>()));
+            sp.GetRequiredService<ILogger<OrderExecutionEngine>>(),
+            sp.GetRequiredService<ITradingMetrics>()));
         return services;
     }
 }

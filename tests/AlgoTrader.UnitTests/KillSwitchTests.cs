@@ -1,7 +1,9 @@
 namespace AlgoTrader.UnitTests;
 
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Domain.Common;
+using AlgoTrader.UnitTests.Observability;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,6 +15,7 @@ public class KillSwitchTests
     private readonly ILogger<KillSwitchService> _logger = NullLogger<KillSwitchService>.Instance;
 
     private KillSwitchService CreateService() => new(_clock, _logger);
+    private KillSwitchService CreateService(ITradingMetrics metrics) => new(_clock, _logger, metrics);
 
     [Fact]
     public void Initially_Disengaged()
@@ -96,6 +99,18 @@ public class KillSwitchTests
         service.Reset("admin");
 
         events.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Engage_EmitsKillSwitchEngagedMetric_OncePerEngagement()
+    {
+        var metrics = new RecordingTradingMetrics();
+        var service = CreateService(metrics);
+
+        service.Engage("daily loss breached", "risk-engine");
+        service.Engage("second", "risk-engine"); // idempotent: must not emit again
+
+        metrics.KillSwitchEngagements.Should().ContainSingle().Which.Should().Be("risk-engine");
     }
 
     private sealed class FakeClock : ISystemClock

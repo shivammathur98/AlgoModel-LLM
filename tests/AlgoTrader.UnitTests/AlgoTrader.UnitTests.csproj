@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AlgoTrader.Application\AlgoTrader.Application.csproj" />
+    <ProjectReference Include="..\..\src\AlgoTrader.Broker\AlgoTrader.Broker.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Domain\AlgoTrader.Domain.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Execution\AlgoTrader.Execution.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Infrastructure\AlgoTrader.Infrastructure.csproj" />

@@ -1,6 +1,7 @@
 namespace AlgoTrader.Execution;
 
 using AlgoTrader.Application.Configuration;
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Domain.Broker;
@@ -39,6 +40,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
     private readonly IOrderRepository _orders;
     private readonly ISystemClock _clock;
     private readonly ILogger<OrderExecutionEngine> _logger;
+    private readonly ITradingMetrics _metrics;
 
     public OrderExecutionEngine(
         TradingSettings trading,
@@ -46,7 +48,8 @@ public sealed class OrderExecutionEngine : IExecutionEngine
         LiveTradingSafetyValidator safety,
         IOrderRepository orders,
         ISystemClock clock,
-        ILogger<OrderExecutionEngine> logger)
+        ILogger<OrderExecutionEngine> logger,
+        ITradingMetrics? metrics = null)
     {
         _trading = trading ?? throw new ArgumentNullException(nameof(trading));
         _broker = broker ?? throw new ArgumentNullException(nameof(broker));
@@ -54,6 +57,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _metrics = metrics ?? NullTradingMetrics.Instance;
     }
 
     /// <inheritdoc />
@@ -66,6 +70,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
             throw new ArgumentOutOfRangeException(nameof(request), request.Quantity, "Order quantity must be positive.");
 
         var order = await PersistNewAsync(request, cancellationToken).ConfigureAwait(false);
+        _metrics.OrderSubmitted(_trading.Mode, order.Side, order.Type);
 
         // Research does no execution at all (§6). Fail closed.
         if (_trading.Mode == TradingMode.Research)
@@ -139,6 +144,10 @@ public sealed class OrderExecutionEngine : IExecutionEngine
             order.RejectionReason = update.StatusMessage;
 
         await UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+        if (update.State == OrderState.Filled)
+            _metrics.OrderFilled(_trading.Mode, order.Side);
+        else if (update.State is OrderState.Rejected or OrderState.Failed)
+            _metrics.OrderRejected(_trading.Mode, order.Side);
         _logger.LogInformation("Applied broker update {State} to {CorrelationId} (filled {Filled}/{Total})",
             update.State, order.CorrelationId, order.FilledQuantity, order.Quantity);
         return Result(order, accepted: true, update.StatusMessage);
@@ -164,6 +173,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
         order.AverageFillPrice = fillPrice;
         order.FilledAtUtc = _clock.UtcNow;
         await UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+        _metrics.OrderFilled(_trading.Mode, order.Side);
         return Result(order, accepted: true, "Simulated market fill at observed price.");
     }
 
@@ -229,6 +239,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
             order.AverageFillPrice = limitPrice;
             order.FilledAtUtc = _clock.UtcNow;
             await UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            _metrics.OrderFilled(_trading.Mode, order.Side);
             return Result(order, accepted: true, "Simulated fill at limit price.");
         }
 
@@ -242,6 +253,7 @@ public sealed class OrderExecutionEngine : IExecutionEngine
         Transition(order, OrderState.Rejected);
         order.RejectionReason = reason;
         await UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+        _metrics.OrderRejected(_trading.Mode, order.Side);
         return Result(order, accepted: false, reason);
     }
 

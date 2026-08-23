@@ -48,8 +48,9 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
             throw new InvalidOperationException("Broker API key and access token are required for WebSocket connection.");
         }
 
+        // The URL carries the api_key and access_token as query parameters — never log it (§5).
         var url = $"wss://ws.kite.trade?api_key={_settings.ApiKey}&access_token={_settings.AccessToken}";
-        _logger.LogInformation("Connecting to Kite WebSocket: {Url}", url);
+        _logger.LogInformation("Connecting to Kite WebSocket");
 
         try
         {
@@ -215,33 +216,98 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
         }
     }
 
+    // Kite binary packet sizes (bytes) for a tradable NSE instrument (§7):
+    // 8 = LTP mode, 44 = quote mode (adds OHLC + day volume), 184 = full mode (adds the 5x2 order book).
+    private const int LtpPacketLength = 8;
+    private const int QuotePacketLength = 44;
+    private const int FullPacketLength = 184;
+
+    // Market-depth block: 5 buy levels then 5 sell levels, each 12 bytes (qty:4, price:4, orders:2, pad:2).
+    private const int DepthStartOffset = 64;
+    private const int DepthLevelSize = 12;
+    private const int DepthLevelsPerSide = 5;
+
+    // Kite sends equity prices as integer paise; divide to get rupees.
+    private const decimal PaisePerRupee = 100m;
+
     private void ParseTickPacket(ReadOnlySpan<byte> packet)
     {
-        // Minimum packet size: instrument_token (4) + last_price (4) = 8 bytes
-        if (packet.Length < 8) return;
+        var parsed = TryParsePacket(packet, DateTimeOffset.UtcNow);
+        if (parsed is null) return;
+
+        TickReceived?.Invoke(this, new TickEventArgs { Tick = parsed.Value.Tick });
+
+        if (parsed.Value.Depth is { } depth)
+        {
+            DepthReceived?.Invoke(this, new MarketDepthEventArgs { Depth = depth });
+        }
+    }
+
+    /// <summary>
+    /// Pure decoder for a single Kite binary tick packet (§7) — the unit under test. Always yields a
+    /// <see cref="Tick"/>; a full-mode packet (<see cref="FullPacketLength"/> bytes) additionally yields a
+    /// <see cref="MarketDepth"/> snapshot of the 5-level order book, and the tick's bid/ask are then taken from
+    /// the top of that book. Shorter packets (LTP/quote mode) carry no book, so bid/ask fall back to the last
+    /// price. Returns <c>null</c> for a runt packet too short to carry even a token and price.
+    /// </summary>
+    /// <param name="packet">One Kite packet, with the 2-byte length prefix already stripped by the framing layer.</param>
+    /// <param name="receivedAtUtc">
+    /// Receipt time, used as the tick/depth timestamp. Passed in (rather than read from the clock inside) so the
+    /// decoder is deterministic under test. The packet's own exchange timestamp is intentionally not decoded here:
+    /// Kite's epoch convention needs verifying against a live feed before it can be trusted for UTC storage.
+    /// </param>
+    public static KiteParsedPacket? TryParsePacket(ReadOnlySpan<byte> packet, DateTimeOffset receivedAtUtc)
+    {
+        if (packet.Length < LtpPacketLength) return null;
 
         var instrumentToken = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(0, 4));
-        var lastPriceRaw = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(4, 4));
-        var lastPrice = lastPriceRaw / 100.0m;
+        var lastPrice = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(4, 4)) / PaisePerRupee;
 
-        // Extract volume if available (offset 8, 4 bytes)
+        // Day volume lives at offset 16 in quote/full packets (offset 8 is last-traded-quantity, not volume);
+        // an 8-byte LTP packet carries no volume.
         long volume = 0;
-        if (packet.Length >= 12)
+        if (packet.Length >= QuotePacketLength)
         {
-            var volumeRaw = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(8, 4));
-            volume = volumeRaw;
+            volume = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(16, 4));
         }
 
-        // For Phase 3 scaffold, use last_price for bid/ask (no depth parsing yet)
+        MarketDepth? depth = null;
+        var bid = lastPrice;
+        var ask = lastPrice;
+        if (packet.Length >= FullPacketLength)
+        {
+            var buy = ParseDepthSide(packet, DepthStartOffset);
+            var sell = ParseDepthSide(packet, DepthStartOffset + DepthLevelsPerSide * DepthLevelSize);
+            depth = new MarketDepth(instrumentToken, receivedAtUtc, lastPrice, volume, buy, sell);
+
+            // Best bid/ask = top of book; keep the last-price fallback if a side is empty (price 0).
+            if (buy[0].Price > 0) bid = buy[0].Price;
+            if (sell[0].Price > 0) ask = sell[0].Price;
+        }
+
         var tick = new Tick(
             InstrumentToken: instrumentToken,
-            TimestampUtc: DateTimeOffset.UtcNow,
+            TimestampUtc: receivedAtUtc,
             LastPrice: lastPrice,
-            BidPrice: lastPrice,
-            AskPrice: lastPrice,
+            BidPrice: bid,
+            AskPrice: ask,
             Volume: volume);
 
-        TickReceived?.Invoke(this, new TickEventArgs { Tick = tick });
+        return new KiteParsedPacket(tick, depth);
+    }
+
+    private static IReadOnlyList<MarketDepthLevel> ParseDepthSide(ReadOnlySpan<byte> packet, int startOffset)
+    {
+        var levels = new MarketDepthLevel[DepthLevelsPerSide];
+        for (var i = 0; i < DepthLevelsPerSide; i++)
+        {
+            var o = startOffset + i * DepthLevelSize;
+            var quantity = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(o, 4));
+            var price = BinaryPrimitives.ReadInt32BigEndian(packet.Slice(o + 4, 4)) / PaisePerRupee;
+            var orders = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(o + 8, 2));
+            levels[i] = new MarketDepthLevel(price, quantity, orders);
+        }
+        return levels;
     }
 
     public void Dispose()
@@ -254,3 +320,9 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
         _webSocket.Dispose();
     }
 }
+
+/// <summary>
+/// Decoded contents of one Kite binary packet: always a <see cref="Tick"/>, plus a <see cref="MarketDepth"/>
+/// snapshot when the packet was full-mode (carried the order book).
+/// </summary>
+public readonly record struct KiteParsedPacket(Tick Tick, MarketDepth? Depth);

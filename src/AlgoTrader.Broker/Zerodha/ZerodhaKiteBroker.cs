@@ -15,24 +15,29 @@ using Microsoft.Extensions.Options;
 /// <summary>
 /// Zerodha Kite Connect broker implementation (§4, §5, §7).
 /// Implements both the order-management contract (<see cref="ITradingBroker"/>) and the
-/// historical-data contract (<see cref="IHistoricalDataProvider"/>).
+/// historical-data contract (<see cref="IHistoricalDataProvider"/>). Once authenticated it also owns a
+/// <see cref="KiteOrderStream"/> that turns Kite order postbacks into <see cref="OrderUpdated"/> events; the
+/// stream is disposed with the broker (<see cref="IDisposable"/>) when its DI scope ends.
 /// </summary>
-public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider
+public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider, IDisposable
 {
     private readonly HttpClient _http;
     private readonly IInstrumentRepository _instruments;
     private readonly ILogger<ZerodhaKiteBroker> _logger;
     private readonly BrokerSettings _settings;
     private volatile bool _isAuthenticated;
+    private KiteOrderStream? _orderStream;
+    private bool _disposed;
 
     public string ProviderName => "Zerodha";
     public bool IsAuthenticated => _isAuthenticated;
     public bool IsConnected => _isAuthenticated;
 
-    /// <summary>Raised when the broker pushes an asynchronous order status update.</summary>
+    /// <summary>Raised when the broker pushes an asynchronous order status update (fill, cancel, reject).</summary>
     /// <remarks>
-    /// Kite delivers postbacks via a separate channel (WebSocket/order-updates); in this phase
-    /// we raise this event from order-poll methods. Full WebSocket wiring is a future phase.
+    /// Backed by <see cref="KiteOrderStream"/>: once <see cref="AuthenticateAsync"/> succeeds, a dedicated Kite
+    /// ticker WebSocket listens for order postbacks and forwards each as a <see cref="BrokerOrderUpdate"/>. The
+    /// stream lives for the authenticated session and is torn down by <see cref="Dispose"/>.
     /// </remarks>
     public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
 
@@ -84,7 +89,35 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider
         response.EnsureSuccessStatusCode();
         _isAuthenticated = true;
         _logger.LogInformation("Authenticated with Zerodha Kite Connect");
+
+        // Start the async order-postback channel so fills/cancels/rejects surface as OrderUpdated (§7).
+        await StartOrderStreamAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Starts the dedicated Kite order-postback stream so <see cref="OrderUpdated"/> fires for asynchronous
+    /// fills, cancels and rejects. Non-fatal: if the stream cannot start it is logged and REST order management
+    /// keeps working (fills are then only learned at end-of-day reconciliation), so authentication still succeeds.
+    /// </summary>
+    private async Task StartOrderStreamAsync(CancellationToken cancellationToken)
+    {
+        if (_orderStream is not null) return; // already streaming for this session
+
+        try
+        {
+            var stream = new KiteOrderStream(_settings, _logger);
+            stream.OrderUpdated += OnStreamOrderUpdated;
+            await stream.StartAsync(cancellationToken).ConfigureAwait(false);
+            _orderStream = stream;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Kite order stream failed to start; asynchronous order updates are unavailable this session.");
+        }
+    }
+
+    private void OnStreamOrderUpdated(object? sender, BrokerOrderUpdate update) => OrderUpdated?.Invoke(this, update);
 
     public async Task<BrokerProfile> GetProfileAsync(CancellationToken cancellationToken = default)
     {
@@ -467,8 +500,22 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider
     }
 
     /// <summary>
-    /// Raises <see cref="OrderUpdated"/>. Exposed for the (future) WebSocket postback handler
-    /// and for unit tests that want to drive the event pipeline.
+    /// Raises <see cref="OrderUpdated"/>. Exposed for unit tests that want to drive the event pipeline
+    /// directly (the live path raises it from the <see cref="KiteOrderStream"/> postback handler).
     /// </summary>
     internal void RaiseOrderUpdated(BrokerOrderUpdate update) => OrderUpdated?.Invoke(this, update);
+
+    /// <summary>Tears down the order-postback stream. Invoked when the broker's DI scope is disposed.</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (_orderStream is not null)
+        {
+            _orderStream.OrderUpdated -= OnStreamOrderUpdated;
+            _orderStream.Dispose();
+            _orderStream = null;
+        }
+    }
 }

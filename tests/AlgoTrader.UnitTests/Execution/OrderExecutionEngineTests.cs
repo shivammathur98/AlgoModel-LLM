@@ -1,6 +1,7 @@
 namespace AlgoTrader.UnitTests.Execution;
 
 using AlgoTrader.Application.Configuration;
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Domain.Broker;
@@ -9,6 +10,7 @@ using AlgoTrader.Domain.Enums;
 using AlgoTrader.Domain.Execution;
 using AlgoTrader.Domain.Orders;
 using AlgoTrader.Execution;
+using AlgoTrader.UnitTests.Observability;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -318,13 +320,67 @@ public sealed class OrderExecutionEngineTests
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
+    // ---- Metrics (observability) -----------------------------------------
+
+    [Fact]
+    public async Task Submit_EmitsOrderSubmitted_ThenFilled_ForPaperLimit()
+    {
+        var metrics = new RecordingTradingMetrics();
+        var engine = Engine(Paper(), new FakeBroker(), new InMemoryOrderRepository(), metrics);
+
+        await engine.SubmitAsync(LimitOrder(quantity: 10, price: 250.50m));
+
+        metrics.Submitted.Should().ContainSingle().Which.Should().Be((TradingMode.Paper, OrderSide.Buy, OrderType.Limit));
+        metrics.Filled.Should().ContainSingle().Which.Should().Be((TradingMode.Paper, OrderSide.Buy));
+        metrics.Rejected.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ResearchMode_EmitsOrderRejected_NotFilled()
+    {
+        var metrics = new RecordingTradingMetrics();
+        var engine = Engine(Mode(TradingMode.Research), new FakeBroker(), new InMemoryOrderRepository(), metrics);
+
+        await engine.SubmitAsync(LimitOrder(quantity: 10, price: 100m));
+
+        metrics.Rejected.Should().ContainSingle().Which.Should().Be((TradingMode.Research, OrderSide.Buy));
+        metrics.Filled.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ApplyPaperFill_EmitsOrderFilled_OnlyWhenFilled()
+    {
+        var metrics = new RecordingTradingMetrics();
+        var engine = Engine(Paper(), new FakeBroker(), new InMemoryOrderRepository(), metrics);
+        var resting = await engine.SubmitAsync(MarketOrder(quantity: 10)); // rests Open — no fill yet
+        metrics.Filled.Should().BeEmpty();
+
+        await engine.ApplyPaperFillAsync(resting.OrderId, fillPrice: 251.25m);
+
+        metrics.Filled.Should().ContainSingle().Which.Should().Be((TradingMode.Paper, OrderSide.Buy));
+    }
+
+    [Fact]
+    public async Task ApplyBrokerUpdate_Rejection_EmitsOrderRejected()
+    {
+        var metrics = new RecordingTradingMetrics();
+        var broker = new FakeBroker { PlaceResult = new PlaceOrderResult(true, BrokerOrderId: "KITE-R") };
+        var engine = Engine(FullyGatedLive(), broker, new InMemoryOrderRepository(), metrics);
+        await engine.SubmitAsync(LimitOrder(quantity: 10, price: 100m)); // Submitted (records a submit, no fill/reject)
+
+        await engine.ApplyBrokerUpdateAsync(new BrokerOrderUpdate("KITE-R", OrderState.Rejected, 0, null, Clock, "RMS"));
+
+        metrics.Rejected.Should().ContainSingle().Which.Should().Be((TradingMode.Live, OrderSide.Buy));
+        metrics.Filled.Should().BeEmpty();
+    }
+
     // ---- Helpers ----------------------------------------------------------
 
     private static readonly DateTimeOffset Clock = new(2026, 8, 24, 4, 30, 0, TimeSpan.Zero);
 
-    private static OrderExecutionEngine Engine(TradingSettings settings, FakeBroker broker, InMemoryOrderRepository repo) =>
+    private static OrderExecutionEngine Engine(TradingSettings settings, FakeBroker broker, InMemoryOrderRepository repo, ITradingMetrics? metrics = null) =>
         new(settings, broker, new LiveTradingSafetyValidator(), repo,
-            new FixedClock(Clock), NullLogger<OrderExecutionEngine>.Instance);
+            new FixedClock(Clock), NullLogger<OrderExecutionEngine>.Instance, metrics);
 
     /// <summary>Submits a fully-gated live limit order that the broker accepts, leaving it Submitted with the given broker id.</summary>
     private static async Task<(OrderExecutionEngine Engine, InMemoryOrderRepository Repo, ExecutionResult Order)> SubmittedLiveOrder(string brokerOrderId)

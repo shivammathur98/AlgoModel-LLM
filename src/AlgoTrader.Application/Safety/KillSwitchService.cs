@@ -1,5 +1,6 @@
 namespace AlgoTrader.Application.Safety;
 
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Domain.Common;
 using Microsoft.Extensions.Logging;
 
@@ -12,15 +13,17 @@ public sealed class KillSwitchService : IKillSwitch
 {
     private readonly ISystemClock _clock;
     private readonly ILogger<KillSwitchService> _logger;
+    private readonly ITradingMetrics _metrics;
     private readonly object _gate = new();
 
     private KillSwitchState _state = KillSwitchState.Disengaged;
     private string? _reason;
 
-    public KillSwitchService(ISystemClock clock, ILogger<KillSwitchService> logger)
+    public KillSwitchService(ISystemClock clock, ILogger<KillSwitchService> logger, ITradingMetrics? metrics = null)
     {
         _clock = clock;
         _logger = logger;
+        _metrics = metrics ?? NullTradingMetrics.Instance;
     }
 
     public KillSwitchState State
@@ -55,6 +58,8 @@ public sealed class KillSwitchService : IKillSwitch
         _logger.LogCritical(
             "KILL SWITCH ENGAGED by {InitiatedBy} at {TimestampUtc}: {Reason}",
             initiatedBy, timestamp, reason);
+
+        _metrics.KillSwitchEngaged(initiatedBy);
 
         StateChanged?.Invoke(this, new KillSwitchEventArgs
         {

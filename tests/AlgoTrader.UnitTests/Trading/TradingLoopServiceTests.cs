@@ -18,9 +18,10 @@ using Microsoft.Extensions.Options;
 using Xunit;
 
 /// <summary>
-/// Verifies the batch-1 trading loop (§8, §11): it ingests live ticks into the shared cache and idles
-/// safely outside Paper/Live or when unconfigured. It must NOT place any order — batch 1 is ingestion
-/// plus the (dormant) live broker-update → execution-engine bridge.
+/// Verifies the trading loop (§8, §11): it ingests live ticks into the shared cache, idles safely outside
+/// Paper/Live or when unconfigured, forwards ticks to the mode's decision cycle (paper in Paper, the
+/// session-bound live cycle in Live), and bridges live broker order updates to the execution engine. The
+/// loop itself places no orders — that is the cycles' job, exercised in their own tests.
 /// </summary>
 public sealed class TradingLoopServiceTests
 {
@@ -105,6 +106,78 @@ public sealed class TradingLoopServiceTests
         await service.StopAsync(CancellationToken.None);
     }
 
+    // ---- Paper decision-cycle forwarding ---------------------------------
+
+    [Fact]
+    public async Task PaperMode_TickReceived_IsForwardedToDecisionCycle()
+    {
+        var cycle = new SpyPaperTradingCycle();
+        var (service, feed) = BuildWithCycle(Trading(TradingMode.Paper), cycle, Infy());
+        await service.StartAsync(CancellationToken.None);
+
+        var tick = new Tick(111, T0, LastPrice: 253.25m, BidPrice: 253.20m, AskPrice: 253.30m, Volume: 5_000);
+        feed.RaiseTick(tick);
+
+        var forwarded = await cycle.Received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        forwarded.InstrumentToken.Should().Be(111);
+
+        await service.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task LiveMode_TickReceived_IsNotForwardedToPaperCycle()
+    {
+        // Live fills come from the broker, not the paper cycle; the paper ledger is not the source of truth.
+        var cycle = new SpyPaperTradingCycle();
+        var (service, feed) = BuildWithCycle(LiveTrading(), cycle, Infy());
+        await service.StartAsync(CancellationToken.None);
+
+        feed.RaiseTick(new Tick(111, T0, LastPrice: 253.25m, BidPrice: 253.20m, AskPrice: 253.30m, Volume: 5_000));
+
+        // Give any (erroneous) fire-and-forget forwarding a chance to run before asserting it did not.
+        await Task.Delay(100);
+        cycle.CallCount.Should().Be(0);
+
+        await service.StopAsync(CancellationToken.None);
+    }
+
+    // ---- Live decision-cycle forwarding + lifecycle (§8, §11, §26) -------
+
+    [Fact]
+    public async Task LiveMode_TickReceived_IsForwardedToLiveCycle_WhichIsAttachedThenDetached()
+    {
+        var cycle = new SpyLiveTradingCycle();
+        var (service, feed) = BuildWithLiveCycle(LiveTrading(), cycle, Infy());
+        await service.StartAsync(CancellationToken.None);
+
+        var tick = new Tick(111, T0, LastPrice: 253.25m, BidPrice: 253.20m, AskPrice: 253.30m, Volume: 5_000);
+        feed.RaiseTick(tick);
+
+        var forwarded = await cycle.Received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        forwarded.InstrumentToken.Should().Be(111);
+        cycle.AttachCount.Should().Be(1); // bound to the authenticated session before ticks flowed
+
+        await service.StopAsync(CancellationToken.None);
+        cycle.DetachCount.Should().Be(1); // released at shutdown
+    }
+
+    [Fact]
+    public async Task PaperMode_TickReceived_IsNotForwardedToLiveCycle()
+    {
+        // The live cycle acts on broker-truth state and must never run in Paper mode, nor be bound to a session.
+        var cycle = new SpyLiveTradingCycle();
+        var (service, feed) = BuildWithLiveCycle(Trading(TradingMode.Paper), cycle, Infy());
+        await service.StartAsync(CancellationToken.None);
+
+        feed.RaiseTick(new Tick(111, T0, LastPrice: 253.25m, BidPrice: 253.20m, AskPrice: 253.30m, Volume: 5_000));
+
+        await Task.Delay(100);
+        cycle.CallCount.Should().Be(0);
+        cycle.AttachCount.Should().Be(0);
+
+        await service.StopAsync(CancellationToken.None);
+    }
+
     // ---- Live broker-update bridge (§25, §26) ----------------------------
 
     [Fact]
@@ -119,6 +192,7 @@ public sealed class TradingLoopServiceTests
                 // Singleton so the loop's session scope and per-event scope resolve these same instances.
                 services.AddSingleton<ITradingBroker>(broker);
                 services.AddSingleton<IExecutionEngine>(engine);
+                services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
             });
 
         await service.StartAsync(CancellationToken.None);
@@ -132,6 +206,69 @@ public sealed class TradingLoopServiceTests
         applied.State.Should().Be(OrderState.Filled);
 
         await service.StopAsync(CancellationToken.None);
+    }
+
+    // ---- End-of-day reconciliation (§26, §28) ----------------------------
+
+    [Fact]
+    public async Task LiveMode_AtShutdown_RunsReconciliation_AndEngagesKillSwitchOnCritical()
+    {
+        // A critical discrepancy at session close means untracked risk or a wrong book: the platform must not
+        // resume trading until an operator has reviewed it, so the kill switch is engaged.
+        var killSwitch = new FakeKillSwitch();
+        var reconciler = new SpyLiveReconciler(criticalReport: true);
+        var (service, _, _) = Build(
+            LiveTrading(), Creds(), Universe("INFY"), killSwitch, new[] { Infy() },
+            configureServices: services =>
+            {
+                services.AddSingleton<ITradingBroker>(new FakeBroker());
+                services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
+            },
+            reconciler: reconciler);
+
+        await service.StartAsync(CancellationToken.None);
+        await service.StopAsync(CancellationToken.None);
+
+        reconciler.CallCount.Should().Be(1);
+        killSwitch.IsEngaged.Should().BeTrue();
+        killSwitch.Reason.Should().Contain("reconciliation");
+    }
+
+    [Fact]
+    public async Task LiveMode_AtShutdown_CleanReconciliation_DoesNotEngageKillSwitch()
+    {
+        var killSwitch = new FakeKillSwitch();
+        var reconciler = new SpyLiveReconciler(criticalReport: false);
+        var (service, _, _) = Build(
+            LiveTrading(), Creds(), Universe("INFY"), killSwitch, new[] { Infy() },
+            configureServices: services =>
+            {
+                services.AddSingleton<ITradingBroker>(new FakeBroker());
+                services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
+            },
+            reconciler: reconciler);
+
+        await service.StartAsync(CancellationToken.None);
+        await service.StopAsync(CancellationToken.None);
+
+        reconciler.CallCount.Should().Be(1);
+        killSwitch.IsEngaged.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task PaperMode_AtShutdown_DoesNotRunReconciliation()
+    {
+        // Reconciliation compares against broker truth; it is a Live-only concern.
+        var reconciler = new SpyLiveReconciler(criticalReport: false);
+        var (service, _, _) = Build(
+            Trading(TradingMode.Paper), Creds(), Universe("INFY"), new FakeKillSwitch(), new[] { Infy() },
+            configureServices: null,
+            reconciler: reconciler);
+
+        await service.StartAsync(CancellationToken.None);
+        await service.StopAsync(CancellationToken.None);
+
+        reconciler.CallCount.Should().Be(0);
     }
 
     // ---- Builders ---------------------------------------------------------
@@ -171,7 +308,8 @@ public sealed class TradingLoopServiceTests
         MarketDataSettings marketData,
         IKillSwitch killSwitch,
         Instrument[] instruments,
-        Action<IServiceCollection>? configureServices)
+        Action<IServiceCollection>? configureServices,
+        ILiveReconciler? reconciler = null)
     {
         var services = new ServiceCollection();
         services.AddScoped<IInstrumentRepository>(_ => new FakeInstrumentRepository(instruments));
@@ -181,13 +319,101 @@ public sealed class TradingLoopServiceTests
         var feed = new FakeLiveFeed();
         var cache = new LastPriceCache();
         var service = new TradingLoopService(
-            provider.GetRequiredService<IServiceScopeFactory>(), feed, cache,
+            provider.GetRequiredService<IServiceScopeFactory>(), feed, cache, new NoopPaperTradingCycle(), new NoopLiveTradingCycle(),
+            reconciler ?? new SpyLiveReconciler(criticalReport: false),
             Options.Create(trading), Options.Create(broker), Options.Create(marketData),
             killSwitch, NullLogger<TradingLoopService>.Instance);
         return (service, feed, cache);
     }
 
+    /// <summary>Builds a loop with a caller-supplied decision cycle to assert tick forwarding. A fake broker keeps
+    /// the Live path's reconciliation wiring from faulting so the loop stays connected.</summary>
+    private static (TradingLoopService Service, FakeLiveFeed Feed) BuildWithCycle(
+        TradingSettings trading, IPaperTradingCycle cycle, params Instrument[] instruments)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped<IInstrumentRepository>(_ => new FakeInstrumentRepository(instruments));
+        services.AddSingleton<ITradingBroker>(new FakeBroker());
+        services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
+        var provider = services.BuildServiceProvider();
+
+        var feed = new FakeLiveFeed();
+        var service = new TradingLoopService(
+            provider.GetRequiredService<IServiceScopeFactory>(), feed, new LastPriceCache(), cycle, new NoopLiveTradingCycle(),
+            new SpyLiveReconciler(criticalReport: false),
+            Options.Create(trading), Options.Create(Creds()), Options.Create(Universe("INFY")),
+            new FakeKillSwitch(), NullLogger<TradingLoopService>.Instance);
+        return (service, feed);
+    }
+
+    /// <summary>Builds a loop with a caller-supplied <b>live</b> decision cycle to assert Live-mode tick forwarding
+    /// and the attach/detach lifecycle. A fake broker authenticates so the live path binds the cycle.</summary>
+    private static (TradingLoopService Service, FakeLiveFeed Feed) BuildWithLiveCycle(
+        TradingSettings trading, ILiveTradingCycle liveCycle, params Instrument[] instruments)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped<IInstrumentRepository>(_ => new FakeInstrumentRepository(instruments));
+        services.AddSingleton<ITradingBroker>(new FakeBroker());
+        services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
+        var provider = services.BuildServiceProvider();
+
+        var feed = new FakeLiveFeed();
+        var service = new TradingLoopService(
+            provider.GetRequiredService<IServiceScopeFactory>(), feed, new LastPriceCache(), new NoopPaperTradingCycle(), liveCycle,
+            new SpyLiveReconciler(criticalReport: false),
+            Options.Create(trading), Options.Create(Creds()), Options.Create(Universe("INFY")),
+            new FakeKillSwitch(), NullLogger<TradingLoopService>.Instance);
+        return (service, feed);
+    }
+
     // ---- Fakes ------------------------------------------------------------
+
+    private sealed class NoopPaperTradingCycle : IPaperTradingCycle
+    {
+        public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class SpyPaperTradingCycle : IPaperTradingCycle
+    {
+        private int _callCount;
+        public TaskCompletionSource<Tick> Received { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _callCount);
+            Received.TrySetResult(tick);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class NoopLiveTradingCycle : ILiveTradingCycle
+    {
+        public void Attach(IServiceProvider sessionServices) { }
+        public void Detach() { }
+        public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class SpyLiveTradingCycle : ILiveTradingCycle
+    {
+        private int _callCount;
+        private int _attachCount;
+        private int _detachCount;
+        public TaskCompletionSource<Tick> Received { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int CallCount => Volatile.Read(ref _callCount);
+        public int AttachCount => Volatile.Read(ref _attachCount);
+        public int DetachCount => Volatile.Read(ref _detachCount);
+
+        public void Attach(IServiceProvider sessionServices) => Interlocked.Increment(ref _attachCount);
+        public void Detach() => Interlocked.Increment(ref _detachCount);
+
+        public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _callCount);
+            Received.TrySetResult(tick);
+            return Task.CompletedTask;
+        }
+    }
 
     private sealed class FakeLiveFeed : ILiveMarketDataProvider
     {
@@ -263,6 +489,47 @@ public sealed class TradingLoopServiceTests
 #pragma warning disable CS0067 // Not raised in these tests.
         public event EventHandler<KillSwitchEventArgs>? StateChanged;
 #pragma warning restore CS0067
+    }
+
+    private sealed class SpyLiveReconciler : ILiveReconciler
+    {
+        private readonly bool _critical;
+        private int _callCount;
+
+        public SpyLiveReconciler(bool criticalReport) => _critical = criticalReport;
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public Task<ReconciliationReport> ReconcileAsync(
+            ITradingBroker broker, IOrderRepository orders, ProductType product,
+            DateTimeOffset fromUtc, DateTimeOffset toUtc, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _callCount);
+            var discrepancies = _critical
+                ? new[]
+                {
+                    new ReconciliationDiscrepancy(
+                        ReconciliationIssue.OrphanPosition, ReconciliationSeverity.Critical, 111, "INFY", "test discrepancy"),
+                }
+                : Array.Empty<ReconciliationDiscrepancy>();
+            return Task.FromResult(new ReconciliationReport(
+                fromUtc, toUtc, product, 0, 0, 0, 0m, 0m, discrepancies));
+        }
+    }
+
+    private sealed class FakeOrderRepository : IOrderRepository
+    {
+        public Task<IReadOnlyList<Order>> GetOpenOrdersAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Order>>(Array.Empty<Order>());
+
+        public Task<IReadOnlyList<Order>> GetOrdersAsync(DateTimeOffset fromUtc, DateTimeOffset toUtc, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Order>>(Array.Empty<Order>());
+
+        public Task<Order> AddAsync(Order order, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task UpdateAsync(Order order, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<Order?> GetByIdAsync(long id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<Order?> GetByBrokerIdAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<Order>> GetByCorrelationIdAsync(string correlationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
     private sealed class FakeExecutionEngine : IExecutionEngine

@@ -2,6 +2,7 @@ namespace AlgoTrader.Application;
 
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Costing;
+using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Application.Services;
 using AlgoTrader.Application.Status;
@@ -88,6 +89,9 @@ public static class DependencyInjection
         // Application services
         services.AddSingleton<LiveTradingSafetyValidator>();
         services.AddSingleton<IKillSwitch, KillSwitchService>();
+
+        // Operational metrics sink (observability/ops): System.Diagnostics.Metrics-backed, zero extra deps.
+        services.AddSingleton<ITradingMetrics, MeterTradingMetrics>();
         services.AddSingleton<ISystemStatusService, SystemStatusService>();
         services.AddScoped<HistoricalCandleBackfillService>();
 
