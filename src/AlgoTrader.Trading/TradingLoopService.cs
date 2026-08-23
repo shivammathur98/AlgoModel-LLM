@@ -61,6 +61,11 @@ public sealed class TradingLoopService : BackgroundService
     private bool _runLiveCycle;
     private CancellationToken _stoppingToken;
 
+    // In-flight decision-cycle tasks. Ticks launch cycles fire-and-forget; shutdown drains these before the
+    // session scope is disposed, so no cycle can reach for a disposed provider or submit an order mid-teardown.
+    private readonly object _cycleLock = new();
+    private readonly List<Task> _inFlightCycles = new();
+
     public TradingLoopService(
         IServiceScopeFactory scopeFactory,
         ILiveMarketDataProvider liveFeed,
@@ -224,11 +229,22 @@ public sealed class TradingLoopService : BackgroundService
 
         // Drive the active decision cycle from the tick stream. Fire-and-forget like broker reconciliation, so a
         // slow cycle never blocks feed ingestion; each cycle serializes its own work internally. At most one of
-        // these flags is set (Paper vs Live), so a tick drives exactly one cycle.
+        // these flags is set (Paper vs Live), so a tick drives exactly one cycle. Tracked so shutdown can drain.
         if (_runPaperCycle)
-            _ = RunPaperCycleAsync(e.Tick);
+            TrackCycle(RunPaperCycleAsync(e.Tick));
         if (_runLiveCycle)
-            _ = RunLiveCycleAsync(e.Tick);
+            TrackCycle(RunLiveCycleAsync(e.Tick));
+    }
+
+    /// <summary>Registers an in-flight cycle task so shutdown can await it, self-removing on completion.</summary>
+    private void TrackCycle(Task cycle)
+    {
+        lock (_cycleLock)
+            _inFlightCycles.Add(cycle);
+
+        cycle.ContinueWith(
+            t => { lock (_cycleLock) _inFlightCycles.Remove(t); },
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task RunPaperCycleAsync(Tick tick)
@@ -368,6 +384,18 @@ public sealed class TradingLoopService : BackgroundService
         // Release the live cycle's session binding before the scope is disposed below, so no in-flight decision
         // reaches for a disposed provider (any that raced through are contained by RunLiveCycleAsync).
         _liveCycle.Detach();
+
+        // Drain any cycle tasks already launched from the tick handler. The handler is now detached and the flags
+        // are false, so no new cycles start; awaiting the outstanding ones guarantees none is still using the
+        // session provider when it is disposed below. Per-cycle errors are already logged, so ignore them here.
+        Task[] pending;
+        lock (_cycleLock)
+            pending = _inFlightCycles.ToArray();
+        if (pending.Length > 0)
+        {
+            try { await Task.WhenAll(pending).ConfigureAwait(false); }
+            catch { /* each cycle logs its own failure; we only need them finished before disposal. */ }
+        }
 
         // End-of-day reconciliation (§26, §28): verify the day's book against broker truth while the authenticated
         // session scope is still alive. Live-only; never throws (shutdown must complete regardless).

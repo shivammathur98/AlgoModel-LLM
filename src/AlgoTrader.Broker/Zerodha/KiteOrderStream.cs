@@ -26,7 +26,6 @@ public sealed class KiteOrderStream : IDisposable
     private readonly ILogger _logger;
     private readonly ClientWebSocket _webSocket;
     private readonly CancellationTokenSource _cts;
-    private Task? _receiveTask;
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
@@ -61,32 +60,8 @@ public sealed class KiteOrderStream : IDisposable
 
         _isRunning = true;
         _logger.LogInformation("Kite order stream connected; listening for order postbacks.");
-        _receiveTask = ReceiveLoopAsync(_cts.Token);
-    }
-
-    /// <summary>Gracefully closes the socket and awaits the receive loop.</summary>
-    public async Task StopAsync(CancellationToken cancellationToken = default)
-    {
-        if (!_isRunning) return;
-        _cts.Cancel();
-
-        try
-        {
-            if (_webSocket.State == WebSocketState.Open)
-                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client closing", cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error closing the Kite order stream.");
-        }
-
-        if (_receiveTask is not null)
-        {
-            try { await _receiveTask.ConfigureAwait(false); }
-            catch { /* receive-loop errors are already logged */ }
-        }
-
-        _isRunning = false;
+        // Fire-and-forget: the loop runs until the token is cancelled or the socket closes; Dispose tears it down.
+        _ = ReceiveLoopAsync(_cts.Token);
     }
 
     /// <summary>
@@ -173,7 +148,12 @@ public sealed class KiteOrderStream : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Kite order stream receive loop error; order updates have stopped flowing.");
+            // Disposal cancels the token and tears down the socket, which surfaces here as a WebSocket/disposed
+            // exception rather than OperationCanceledException — that is an expected shutdown, not a real fault.
+            if (cancellationToken.IsCancellationRequested || _disposed)
+                _logger.LogDebug("Kite order stream receive loop ended during shutdown.");
+            else
+                _logger.LogError(ex, "Kite order stream receive loop error; order updates have stopped flowing.");
         }
         finally
         {

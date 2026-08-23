@@ -103,15 +103,18 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
     {
         if (_orderStream is not null) return; // already streaming for this session
 
+        var stream = new KiteOrderStream(_settings, _logger);
         try
         {
-            var stream = new KiteOrderStream(_settings, _logger);
             stream.OrderUpdated += OnStreamOrderUpdated;
             await stream.StartAsync(cancellationToken).ConfigureAwait(false);
             _orderStream = stream;
         }
         catch (Exception ex)
         {
+            // Dispose the half-started stream so its socket/CTS don't leak; REST order management keeps working.
+            stream.OrderUpdated -= OnStreamOrderUpdated;
+            stream.Dispose();
             _logger.LogWarning(ex,
                 "Kite order stream failed to start; asynchronous order updates are unavailable this session.");
         }

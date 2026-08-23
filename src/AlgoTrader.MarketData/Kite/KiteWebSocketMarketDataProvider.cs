@@ -138,6 +138,7 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
+        var message = new List<byte>();
 
         try
         {
@@ -153,9 +154,14 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    var message = new byte[result.Count];
-                    Array.Copy(buffer, message, result.Count);
-                    ProcessBinaryMessage(message);
+                    // A single tick batch can exceed the 8192-byte buffer and arrive as several frames; accumulate
+                    // until EndOfMessage so the length-prefixed packet framing is never split mid-packet.
+                    message.AddRange(new ArraySegment<byte>(buffer, 0, result.Count));
+                    if (!result.EndOfMessage)
+                        continue;
+
+                    ProcessBinaryMessage(message.ToArray());
+                    message.Clear();
                 }
                 else if (result.MessageType == WebSocketMessageType.Text)
                 {

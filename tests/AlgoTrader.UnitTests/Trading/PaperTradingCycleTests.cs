@@ -122,17 +122,19 @@ public sealed class PaperTradingCycleTests
     public async Task Entry_WhileAnOrderIsInFlight_IsNotStacked()
     {
         var h = new Harness();
-        h.Strategy.OnClose = _ => new[] { Entry(entry: 100m, stop: 95m, target: 110m) };
+        // Two entries for the same instrument on one candle: the first submits and rests in _pending; the second
+        // must be short-circuited by the in-flight guard before it reaches the risk engine — never a stacked order.
+        h.Strategy.OnClose = _ => new[]
+        {
+            Entry(entry: 100m, stop: 95m, target: 110m),
+            Entry(entry: 100m, stop: 95m, target: 110m),
+        };
         h.Aggregator.Enqueue(CandleAt(T0, close: 100m));
-        h.Aggregator.Enqueue(CandleAt(T0.AddMinutes(1), close: 100m));
 
-        await h.Cycle.OnTickAsync(TickAt(T0, 100m));                 // first entry rests (pending)
-        await h.Cycle.OnTickAsync(TickAt(T0.AddSeconds(1), 100m));   // second close arrives before any fill
+        await h.Cycle.OnTickAsync(TickAt(T0, 100m));
 
-        // The second tick's candle closed while the first order was still in flight → not stacked.
-        // (That tick did not carry the resting order's instrument fill because the fill uses this tick's price;
-        // here the guard is what matters: exactly one order was submitted.)
-        h.Execution.Submitted.Should().HaveCount(1);
+        h.Execution.Submitted.Should().ContainSingle();  // the second entry was blocked while the first rested
+        h.Risk.SignalCalls.Should().Be(1);               // and it short-circuited before the risk engine
     }
 
     // ---- Exit -------------------------------------------------------------
