@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using AlgoTrader.Application.Repositories;
+using AlgoTrader.Domain.Enums;
 using AlgoTrader.Domain.MarketData;
 
 /// <summary>Immutable metadata required to reproduce and audit a backtest result later.</summary>

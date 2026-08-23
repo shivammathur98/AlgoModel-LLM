@@ -18,6 +18,7 @@
     <ProjectReference Include="..\AlgoTrader.Persistence\AlgoTrader.Persistence.csproj" />
     <ProjectReference Include="..\AlgoTrader.Risk\AlgoTrader.Risk.csproj" />
     <ProjectReference Include="..\AlgoTrader.Strategy\AlgoTrader.Strategy.csproj" />
+    <ProjectReference Include="..\AlgoTrader.Trading\AlgoTrader.Trading.csproj" />
   </ItemGroup>
 
 </Project>

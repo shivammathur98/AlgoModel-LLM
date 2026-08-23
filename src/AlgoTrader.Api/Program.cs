@@ -3,9 +3,13 @@ using AlgoTrader.Application;
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Broker;
+using AlgoTrader.Execution;
 using AlgoTrader.Infrastructure;
 using AlgoTrader.MarketData;
 using AlgoTrader.Persistence;
+using AlgoTrader.Risk;
+using AlgoTrader.Strategy;
+using AlgoTrader.Trading;
 using Microsoft.Extensions.Options;
 using Serilog;
 
@@ -31,6 +35,10 @@ try
     builder.Services.AddAlgoTraderBroker();
     builder.Services.AddAlgoTraderMarketData();
     builder.Services.AddAlgoTraderPersistence(builder.Configuration);
+    builder.Services.AddActiveStrategy(builder.Configuration);
+    builder.Services.AddAlgoTraderRisk();
+    builder.Services.AddAlgoTraderExecution();
+    builder.Services.AddAlgoTraderTrading();
 
     // Health checks (§35)
     builder.Services.AddHealthChecks();

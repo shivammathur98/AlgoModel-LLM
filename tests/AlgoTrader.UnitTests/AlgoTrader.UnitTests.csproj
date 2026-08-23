@@ -23,10 +23,13 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AlgoTrader.Application\AlgoTrader.Application.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Domain\AlgoTrader.Domain.csproj" />
+    <ProjectReference Include="..\..\src\AlgoTrader.Execution\AlgoTrader.Execution.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Infrastructure\AlgoTrader.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.MarketData\AlgoTrader.MarketData.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Persistence\AlgoTrader.Persistence.csproj" />
     <ProjectReference Include="..\..\src\AlgoTrader.Risk\AlgoTrader.Risk.csproj" />
+    <ProjectReference Include="..\..\src\AlgoTrader.Strategy\AlgoTrader.Strategy.csproj" />
+    <ProjectReference Include="..\..\src\AlgoTrader.Trading\AlgoTrader.Trading.csproj" />
   </ItemGroup>
 
 </Project>

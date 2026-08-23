@@ -34,6 +34,14 @@ public sealed class CostSettings
     [Range(0.0, 1.0)]
     public decimal SttPercentSell { get; set; } = 0.00025m;
 
+    /// <summary>
+    /// STT on equity delivery (0.001 = 0.1%), charged on BOTH the buy and the sell leg. Modelling this is
+    /// essential for honest multi-day/swing (CNC) backtests: delivery pays no brokerage but this STT, on
+    /// both legs, is the dominant statutory charge and dwarfs the intraday sell-only rate.
+    /// </summary>
+    [Range(0.0, 1.0)]
+    public decimal SttPercentDelivery { get; set; } = 0.001m;
+
     /// <summary>NSE equity exchange transaction charges (0.0000297 = 0.00297%).</summary>
     [Range(0.0, 1.0)]
     public decimal ExchangeTransactionChargePercent { get; set; } = 0.0000297m;

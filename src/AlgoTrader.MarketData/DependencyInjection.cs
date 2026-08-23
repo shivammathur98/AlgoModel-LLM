@@ -28,6 +28,10 @@ public static class DependencyInjection
         // Candle aggregator: stateful singleton that aggregates ticks into candles.
         services.AddSingleton<ICandleAggregator, CandleAggregator>();
 
+        // Last-price cache: shared, thread-safe snapshot of the newest price per instrument (§7). The
+        // live feed writes it; the paper trading loop (§8) and risk staleness checks (§14) read it.
+        services.AddSingleton<ILastPriceCache, LastPriceCache>();
+
         services.AddHttpClient<KiteHistoricalDataProvider>((serviceProvider, client) =>
         {
             var broker = serviceProvider.GetRequiredService<IOptions<BrokerSettings>>().Value;

@@ -1,11 +1,14 @@
 namespace AlgoTrader.Application;
 
 using AlgoTrader.Application.Configuration;
+using AlgoTrader.Application.Costing;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Application.Services;
 using AlgoTrader.Application.Status;
+using AlgoTrader.Domain.Costing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 /// <summary>
 /// Registers all Application-layer services and binds strongly typed configuration (§30).
@@ -46,9 +49,15 @@ public static class DependencyInjection
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
-        // Strategy settings
+        // Strategy settings (MomentumBreakoutV1 parameters + the Strategy:Name selector)
         services.AddOptions<StrategySettings>()
             .Bind(configuration.GetSection(StrategySettings.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        // Swing strategy settings (TrendAlignedPullbackV1 parameters)
+        services.AddOptions<SwingStrategySettings>()
+            .Bind(configuration.GetSection(SwingStrategySettings.SectionName))
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
@@ -81,6 +90,10 @@ public static class DependencyInjection
         services.AddSingleton<IKillSwitch, KillSwitchService>();
         services.AddSingleton<ISystemStatusService, SystemStatusService>();
         services.AddScoped<HistoricalCandleBackfillService>();
+
+        // Centralized trading cost calculator (§18): the single home for all charge formulas.
+        services.AddSingleton<ITradingCostCalculator>(sp =>
+            new ZerodhaEquityCostCalculator(sp.GetRequiredService<IOptions<CostSettings>>().Value));
 
         return services;
     }
