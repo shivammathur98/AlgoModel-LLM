@@ -1,72 +1,61 @@
-﻿# AlgoTrader â€” Algorithmic Trading Platform
+# AlgoTrader - Algorithmic Trading Platform
 
-Production-oriented algorithmic trading platform for Indian NSE equity intraday trading, built with C# / .NET 9.
+A highly structured, modular, event-driven algorithmic trading platform built in .NET 9 for the Indian equity markets (NSE via Zerodha Kite). Designed for intraday and swing equity strategies with a relentless focus on safety, execution parity, and deterministic state transitions.
 
-## Current Status
+> **Status:**
+> **FEATURE-COMPLETE AT THE ENGINE LEVEL (Phases 1-11); Phase 12 go-live is operational, not code.** The full path - backtesting engine, two strategies, cost/risk/sizing engines, live WebSocket market data (ticks **and** 5-level depth), Zerodha broker integration with async order postbacks, the triple-gated order-execution engine, and the hosted paper/live trading loop with reconciliation and metrics - is implemented and unit-tested.
 
-**FEATURE-COMPLETE AT THE ENGINE LEVEL (Phases 1â€“11); Phase 12 go-live is operational, not code.** The full path â€” backtesting engine, two strategies, cost/risk/sizing engines, live WebSocket market data (ticks **and** 5-level depth), Zerodha broker integration with async order postbacks, the triple-gated order-execution engine, and the hosted paper/live trading loop with reconciliation and metrics â€” is implemented and unit-tested.
+## Architecture & Layers
 
-What remains is **validation and operations, not missing features**: the two strategies are unvalidated hypotheses (no walk-forward/out-of-sample study yet), and the loop has not yet been run against a live Kite feed for a full paper session or a live dry-run. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the full 12-phase roadmap and honest per-phase status.
+Following Clean Architecture principles, the platform is cleanly separated into layered projects.
 
-## Architecture
-
-Clean / modular-monolith. Twelve source projects; the strategy layer never touches broker types.
-
-```
-AlgoTrader.Domain          â† Core entities, value objects, interfaces (no dependencies)
-AlgoTrader.Application     â† Configuration, safety, costing, observability, orchestration contracts
-AlgoTrader.Persistence     â† EF Core model, migrations, repositories, seeders (SQL Server)
-AlgoTrader.MarketData      â† Kite historical API + live WebSocket feed (ticks + 5-level depth)
-AlgoTrader.Strategy        â† IStrategy implementations + indicators (broker-agnostic)
-AlgoTrader.Backtesting     â† Deterministic candle-driven replay engine + metrics
-AlgoTrader.Risk            â† Pre-trade risk engine + position sizing
-AlgoTrader.Broker          â† Zerodha Kite Connect adapter + order-postback stream
-AlgoTrader.Execution       â† Order execution engine (state machine, triple-gate routing)
-AlgoTrader.Trading         â† Hosted trading loop, paper + live cycles, reconciliation
-AlgoTrader.Infrastructure  â† System clock, cross-cutting integrations
-AlgoTrader.Api             â† Composition root, health/status endpoints
+```text
+AlgoTrader.Domain          -> Core entities, value objects, interfaces (no dependencies)
+AlgoTrader.Application     -> Configuration, safety, costing, observability, orchestration contracts
+AlgoTrader.Persistence     -> EF Core model, migrations, repositories, seeders (SQL Server)
+AlgoTrader.MarketData      -> Kite historical API + live WebSocket feed (ticks + 5-level depth)
+AlgoTrader.Strategy        -> IStrategy implementations + indicators (broker-agnostic)
+AlgoTrader.Backtesting     -> Deterministic candle-driven replay engine + metrics
+AlgoTrader.Risk            -> Pre-trade risk engine + position sizing
+AlgoTrader.Broker          -> Zerodha Kite Connect adapter + order-postback stream
+AlgoTrader.Execution       -> Order execution engine (state machine, triple-gate routing)
+AlgoTrader.Trading         -> Hosted trading loop, paper + live cycles, reconciliation
+AlgoTrader.Infrastructure  -> System clock, cross-cutting integrations
+AlgoTrader.Api             -> Composition root, health/status endpoints
 ```
 
-**Dependency direction:** Domain â† Application â† everything else. Strategies depend only on Domain and Application (typed config) â€” never on broker/Zerodha classes (Â§16).
+**Dependency direction:** Domain <- Application <- everything else. Strategies depend only on Domain and Application (typed config) - never on broker/Zerodha classes (Sec 16).
 
 ## Key Design Principles
 
-- **Triple-gated live trading** (Â§6, Â§36): `Mode=Live` AND `EnableLiveTrading=true` AND `LiveTradingAcknowledgement="I-ACCEPT-LIVE-TRADING-RISK"`. The platform refuses to start if these are misconfigured.
+- **Triple-gated live trading** (Sec 6, Sec 36): `Mode=Live` AND `EnableLiveTrading=true` AND `LiveTradingAcknowledgement="I-ACCEPT-LIVE-TRADING-RISK"`. The platform refuses to start if these are misconfigured.
 - **Options validation**: All configuration sections use DataAnnotations + custom validators. Invalid config causes startup failure.
 - **Deterministic time**: All business logic uses `ISystemClock` (Domain/Common/ISystemClock.cs) for testability.
-- **Order state machine** (Â§25): Explicit transitions enforced in Domain/Enums/OrderEnums.cs with 40+ test cases.
-- **Kill switch** (Â§15): Thread-safe emergency stop (Application/Safety/KillSwitchService.cs) with event-based notifications.
+- **Order state machine** (Sec 25): Explicit transitions enforced in Domain/Enums/OrderEnums.cs with 40+ test cases.
+- **Kill switch** (Sec 15): Thread-safe emergency stop (Application/Safety/KillSwitchService.cs) with event-based notifications.
 - **Historical market data**: `KiteHistoricalDataProvider` maps the Kite candle API into UTC domain candles; `HistoricalCandleBackfillService` fetches bounded windows and persists idempotently.
-- **Live market data** (Â§7): `KiteWebSocketMarketDataProvider` decodes Kite's binary tick protocol, including full-mode packets carrying the **5Ã—2 market depth** book, and derives best bid/ask from the top of book.
+- **Live market data** (Sec 7): `KiteWebSocketMarketDataProvider` decodes Kite's binary tick protocol, including full-mode packets carrying the **5x2 market depth** book, and derives best bid/ask from the top of book.
 - **Money is `decimal`, time is UTC**: all monetary values use `decimal` (never `double`); timestamps are UTC internally, IST = UTC+05:30.
-- **No look-ahead** (Â§16): the backtest engine fills on the *next* candle; strategies see only closed candles available at the decision timestamp.
-- **Risk before every entry** (Â§14): a stateless pre-trade risk engine vetoes risk-increasing orders; the same `RiskAwarePositionSizer` is shared by backtest, paper, and live.
-- **One execution path** (Â§25): every order flows through `OrderExecutionEngine`, is persisted (even rejections, for audit), and real transmission is triple-gate re-checked at send time.
+- **No look-ahead** (Sec 16): the backtest engine fills on the *next* candle; strategies see only closed candles available at the decision timestamp.
+- **Risk before every entry** (Sec 14): a stateless pre-trade risk engine vetoes risk-increasing orders; the same `RiskAwarePositionSizer` is shared by backtest, paper, and live.
+- **One execution path** (Sec 25): every order flows through `OrderExecutionEngine`, is persisted (even rejections, for audit), and real transmission is triple-gate re-checked at send time.
 
-## Quick Start
+## Running the API
 
 ```bash
-# Build
-dotnet build AlgoTrader.sln
-
-# Test
-dotnet test AlgoTrader.sln
-
-# Run API
 cd src/AlgoTrader.Api
 dotnet run
 ```
 
-API starts on `http://localhost:5080`. Endpoints:
-- `GET /health` â€” liveness check
-- `GET /health/ready` â€” readiness check
-- `GET /api/status` â€” current mode, kill switch state, uptime
+- `GET /health` - liveness check
+- `GET /health/ready` - readiness check
+- `GET /api/status` - current mode, kill switch state, uptime
 
 ## Configuration
 
-All settings live in `src/AlgoTrader.Api/appsettings.json`. Secrets (broker API keys, access tokens) come from environment variables or secret stores â€” never commit real credentials.
+All settings live in `src/AlgoTrader.Api/appsettings.json`. Secrets (broker API keys, access tokens) come from environment variables or secret stores - never commit real credentials.
 
-### Trading Mode (Â§6)
+### Trading Mode (Sec 6)
 
 ```json
 {
@@ -80,12 +69,12 @@ All settings live in `src/AlgoTrader.Api/appsettings.json`. Secrets (broker API 
 ```
 
 **Modes:**
-- `Research` â€” data exploration, no broker interaction
-- `Backtest` â€” historical replay, no broker interaction
-- `Paper` â€” live market data, simulated execution (Phase 8)
-- `Live` â€” real orders (Phase 12, requires triple-gate validation)
+- `Research` — data exploration, no broker interaction
+- `Backtest` — historical replay, no broker interaction
+- `Paper` — live market data, simulated execution (Phase 8)
+- `Live` — real orders (Phase 12, requires triple-gate validation)
 
-### Risk Limits (Â§10, Â§14, Â§15)
+### Risk Limits (Sec 10, Sec 14, Sec 15)
 
 ```json
 {
@@ -129,41 +118,33 @@ export Broker__ApiSecret="your_kite_api_secret"
 export Broker__AccessToken="your_daily_access_token"
 ```
 
-### Strategy Parameters (Â§11, Â§12)
+### Strategy Parameters (Sec 11, Sec 12)
 
-Two selectable strategies, chosen via `Strategy:Name` (both broker-agnostic, both unvalidated hypotheses):
-- **MomentumBreakoutV1** â€” intraday breakout (Phase 5), shown below.
-- **TrendAlignedPullbackV1** â€” 15-minute multi-session swing / delivery (trend-regime + pullback-resume entry, ATR stop capped by a max %, trend/time exits).
+Currently ships with two algorithmic archetypes:
 
-MomentumBreakoutV1 hypothesis (Phase 5):
+- **MomentumBreakoutV1** - intraday breakout (Phase 5), shown below.
+- **TrendAlignedPullbackV1** - 15-minute multi-session swing / delivery (trend-regime + pullback-resume entry, ATR stop capped by a max %, trend/time exits).
+
+**Hypothesis only** - these parameters are research values, not optimized constants. The strategy is unproven until backtested.
 
 ```json
 {
   "Strategy": {
-    "Name": "MomentumBreakoutV1",
-    "Version": "1.0.0",
-    "Timeframe": "Minute5",
-    "LookbackBars": 10,
-    "VolumeMultiplier": 1.5,
-    "EmaPeriod": 20,
-    "UseTrendFilter": true,
-    "StopLossPercent": 0.50,
-    "TargetPercent": 1.00,
-    "UseTrailingStop": false,
-    "MaximumHoldingMinutes": 120,
-    "MaxTradesPerDay": 3,
-    "EntryStartTime": "09:20",
-    "EntryCutoffTime": "14:30",
-    "ExitTime": "15:15"
+    "ActiveStrategy": "MomentumBreakoutV1",
+    "Parameters": {
+      "Timeframe": "OneMinute",
+      "LookbackPeriods": 20,
+      "BreakoutMultiplier": 1.5,
+      "StopLossAtrMultiplier": 2.0,
+      "ProfitTargetAtrMultiplier": 4.0
+    }
   }
 }
 ```
 
-**Hypothesis only** â€” these parameters are research values, not optimized constants. The strategy is unproven until backtested.
+### Trading Costs (Sec 18)
 
-### Trading Costs (Â§18)
-
-Zerodha NSE equity intraday charges (Phase 6):
+Models NSE equity delivery charges exactly (Zerodha schedule).
 
 ```json
 {
@@ -212,7 +193,7 @@ dotnet test tests/AlgoTrader.UnitTests
 dotnet test AlgoTrader.sln --verbosity normal
 ```
 
-**Current test coverage â€” 335 tests green** (build: 0 warnings / 0 errors on .NET 9):
+**Current test coverage - 335 tests green** (build: 0 warnings / 0 errors on .NET 9):
 - UnitTests: 321 tests (configuration/safety, persistence, candle backfill, Kite historical mapping, live WebSocket tick + depth decode, strategies, cost/risk/sizing engines, order execution, broker order stream, and the paper/live trading cycles)
 - BacktestingTests: 10 tests (metrics, data splits, conservative intrabar exits, next-candle fills, end-of-day exits, slippage, and an end-to-end multi-session swing run)
 - IntegrationTests: 4 tests (health/status endpoints via WebApplicationFactory)
@@ -221,57 +202,57 @@ dotnet test AlgoTrader.sln --verbosity normal
 
 ```
 AlgoTrader.sln
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ AlgoTrader.Domain/              # Core entities, value objects, interfaces (no deps)
-â”‚   â”‚   â”œâ”€â”€ Common/                      # Entity, ISystemClock
-â”‚   â”‚   â”œâ”€â”€ Enums/                       # TradingMode, OrderState, Timeframe, etc.
-â”‚   â”‚   â”œâ”€â”€ Instruments/                 # Instrument record
-â”‚   â”‚   â”œâ”€â”€ MarketData/                  # Candle, Tick, MarketDepth, provider interfaces
-â”‚   â”‚   â”œâ”€â”€ Orders/                      # OrderRequest, Order (state machine)
-â”‚   â”‚   â”œâ”€â”€ Broker/                      # ITradingBroker, BrokerModels
-â”‚   â”‚   â”œâ”€â”€ Costing/                     # ITradingCostCalculator
-â”‚   â”‚   â”œâ”€â”€ Risk/                        # IRiskEngine
-â”‚   â”‚   â”œâ”€â”€ Sizing/                      # IPositionSizer
-â”‚   â”‚   â”œâ”€â”€ Strategy/                    # IStrategy, StrategyContext
-â”‚   â”‚   â””â”€â”€ Portfolio/                   # OpenPosition
-â”‚   â”œâ”€â”€ AlgoTrader.Application/          # Configuration, safety, costing, observability
-â”‚   â”‚   â”œâ”€â”€ Configuration/               # Strongly-typed settings + validators
-â”‚   â”‚   â”œâ”€â”€ Safety/                      # LiveTradingSafetyValidator, KillSwitchService
-â”‚   â”‚   â”œâ”€â”€ Costing/                     # ZerodhaEquityCostCalculator
-â”‚   â”‚   â”œâ”€â”€ Observability/               # ITradingMetrics, MeterTradingMetrics
-â”‚   â”‚   â””â”€â”€ Status/                      # SystemStatus, ISystemStatusService
-â”‚   â”œâ”€â”€ AlgoTrader.Persistence/          # EF Core: DbContext, migrations, repositories, seeders
-â”‚   â”œâ”€â”€ AlgoTrader.MarketData/           # Kite historical provider + live WebSocket feed
-â”‚   â”‚   â””â”€â”€ Kite/                        # KiteHistoricalDataProvider, KiteWebSocketMarketDataProvider
-â”‚   â”œâ”€â”€ AlgoTrader.Strategy/             # MomentumBreakoutV1, TrendAlignedPullbackV1, Indicators
-â”‚   â”œâ”€â”€ AlgoTrader.Backtesting/          # BacktestEngine, metrics, data splits, execution models
-â”‚   â”œâ”€â”€ AlgoTrader.Risk/                 # RiskEngine, RiskAwarePositionSizer
-â”‚   â”œâ”€â”€ AlgoTrader.Broker/               # Zerodha Kite adapter
-â”‚   â”‚   â””â”€â”€ Zerodha/                     # ZerodhaKiteBroker, KiteOrderStream
-â”‚   â”œâ”€â”€ AlgoTrader.Execution/            # OrderExecutionEngine (state machine, triple-gate routing)
-â”‚   â”œâ”€â”€ AlgoTrader.Trading/              # Hosted loop, paper + live cycles, reconciliation
-â”‚   â”‚   â”œâ”€â”€ TradingLoopService.cs        # Hosted service (gated, never crashes the host)
-â”‚   â”‚   â”œâ”€â”€ PaperTradingCycle.cs         # PaperPortfolio + paper decision cycle
-â”‚   â”‚   â””â”€â”€ LiveTradingCycle.cs          # LiveAccountView + LiveReconciler
-â”‚   â”œâ”€â”€ AlgoTrader.Infrastructure/       # SystemClock, cross-cutting integrations
-â”‚   â””â”€â”€ AlgoTrader.Api/                  # Composition root
-â”‚       â”œâ”€â”€ Program.cs                   # Serilog, DI wiring, startup safety gate
-â”‚       â”œâ”€â”€ Endpoints/                   # GET /api/status
-â”‚       â””â”€â”€ appsettings.json             # Configuration template
-â””â”€â”€ tests/
-    â”œâ”€â”€ AlgoTrader.UnitTests/            # 294 tests
-    â”œâ”€â”€ AlgoTrader.BacktestingTests/     # 7 tests
-    â””â”€â”€ AlgoTrader.IntegrationTests/     # 3 tests
+|-- src/
+|   |-- AlgoTrader.Domain/              # Core entities, value objects, interfaces (no deps)
+|   |   |-- Common/                      # Entity, ISystemClock
+|   |   |-- Enums/                       # TradingMode, OrderState, Timeframe, etc.
+|   |   |-- Instruments/                 # Instrument record
+|   |   |-- MarketData/                  # Candle, Tick, MarketDepth, provider interfaces
+|   |   |-- Orders/                      # OrderRequest, Order (state machine)
+|   |   |-- Broker/                      # ITradingBroker, BrokerModels
+|   |   |-- Costing/                     # ITradingCostCalculator
+|   |   |-- Risk/                        # IRiskEngine
+|   |   |-- Sizing/                      # IPositionSizer
+|   |   |-- Strategy/                    # IStrategy, StrategyContext
+|   |   `-- Portfolio/                   # OpenPosition
+|   |-- AlgoTrader.Application/          # Configuration, safety, costing, observability
+|   |   |-- Configuration/               # Strongly-typed settings + validators
+|   |   |-- Safety/                      # LiveTradingSafetyValidator, KillSwitchService
+|   |   |-- Costing/                     # ZerodhaEquityCostCalculator
+|   |   |-- Observability/               # ITradingMetrics, MeterTradingMetrics
+|   |   `-- Status/                      # SystemStatus, ISystemStatusService
+|   |-- AlgoTrader.Persistence/          # EF Core: DbContext, migrations, repositories, seeders
+|   |-- AlgoTrader.MarketData/           # Kite historical provider + live WebSocket feed
+|   |   `-- Kite/                        # KiteHistoricalDataProvider, KiteWebSocketMarketDataProvider
+|   |-- AlgoTrader.Strategy/             # MomentumBreakoutV1, TrendAlignedPullbackV1, Indicators
+|   |-- AlgoTrader.Backtesting/          # BacktestEngine, metrics, data splits, execution models
+|   |-- AlgoTrader.Risk/                 # RiskEngine, RiskAwarePositionSizer
+|   |-- AlgoTrader.Broker/               # Zerodha Kite adapter
+|   |   `-- Zerodha/                     # ZerodhaKiteBroker, KiteOrderStream
+|   |-- AlgoTrader.Execution/            # OrderExecutionEngine (state machine, triple-gate routing)
+|   |-- AlgoTrader.Trading/              # Hosted loop, paper + live cycles, reconciliation
+|   |   |-- TradingLoopService.cs        # Hosted service (gated, never crashes the host)
+|   |   |-- PaperTradingCycle.cs         # PaperPortfolio + paper decision cycle
+|   |   `-- LiveTradingCycle.cs          # LiveAccountView + LiveReconciler
+|   |-- AlgoTrader.Infrastructure/       # SystemClock, cross-cutting integrations
+|   `-- AlgoTrader.Api/                  # Composition root
+|       |-- Program.cs                   # Serilog, DI wiring, startup safety gate
+|       |-- Endpoints/                   # GET /api/status
+|       `-- appsettings.json             # Configuration template
+`-- tests/
+    |-- AlgoTrader.UnitTests/            # 294 tests
+    |-- AlgoTrader.BacktestingTests/     # 7 tests
+    `-- AlgoTrader.IntegrationTests/     # 3 tests
 ```
 
 ## What's Next
 
-Phases 1â€“11 are implemented and tested. The remaining work is **validation and operations, not new engine code**:
+Phases 1-11 are implemented and tested. The remaining work is **validation and operations, not new engine code**:
 
-1. **Strategy validation** â€” run both strategies through the backtest engine over real historical NSE data (walk-forward + out-of-sample). No profitability is claimed until this is done.
-2. **Paper session against a live feed** â€” run the hosted loop in `Paper` mode for full sessions and reconcile the paper ledger.
-3. **Live dry-run** â€” real credentials, gates *off*, zero orders sent â€” to validate connectivity, auth, and the postback stream.
-4. **Staged go-live** â€” only then, the triple-gated first armed session at smallest viable size, under supervision (see `docs/GO_LIVE_CHECKLIST.md`).
+1. **Strategy validation** - run both strategies through the backtest engine over real historical NSE data (walk-forward + out-of-sample). No profitability is claimed until this is done.
+2. **Paper session against a live feed** - run the hosted loop in `Paper` mode for full sessions and reconcile the paper ledger.
+3. **Live dry-run** - real credentials, gates *off*, zero orders sent - to validate connectivity, auth, and the postback stream.
+4. **Staged go-live** - only then, the triple-gated first armed session at smallest viable size, under supervision (see `docs/GO_LIVE_CHECKLIST.md`).
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the full per-phase status.
 
@@ -317,5 +298,5 @@ Questions or issues? Open a GitHub issue or contact the maintainer.
 
 ---
 
-**Last updated**: Phases 1â€“11 implemented; live market depth added; 335 tests green (2026-08-26)
+**Last updated**: Phases 1-11 implemented; live market depth added; 335 tests green (2026-08-26)
 
