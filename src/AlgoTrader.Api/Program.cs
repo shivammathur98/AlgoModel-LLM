@@ -76,6 +76,7 @@ try
     app.MapHealthChecks("/health");
     app.MapHealthChecks("/health/ready");
     app.MapStatusEndpoints();
+    app.MapBacktestEndpoints();
 
     app.Run();
 }

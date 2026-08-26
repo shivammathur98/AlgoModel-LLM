@@ -4,6 +4,7 @@ using AlgoTrader.Application.Repositories;
 using AlgoTrader.Application.Services;
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Domain.MarketData;
+using AlgoTrader.MarketData.Jugaad;
 using AlgoTrader.MarketData.Kite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -14,7 +15,7 @@ public static class DependencyInjection
     /// <summary>Adds market data services: WebSocket provider, candle aggregator, and orchestrator.</summary>
     public static IServiceCollection AddAlgoTraderMarketData(this IServiceCollection services)
     {
-        // Symbol resolver: resolves instrument token → (symbol, exchange) via a scoped repository.
+        // Symbol resolver: resolves instrument token -> (symbol, exchange) via a scoped repository.
         services.AddSingleton<Func<int, (string Symbol, string Exchange)>>(sp => 
         {
             var cache = new System.Collections.Concurrent.ConcurrentDictionary<int, (string Symbol, string Exchange)>();
@@ -34,8 +35,8 @@ public static class DependencyInjection
         // Candle aggregator: stateful singleton that aggregates ticks into candles.
         services.AddSingleton<ICandleAggregator, CandleAggregator>();
 
-        // Last-price cache: shared, thread-safe snapshot of the newest price per instrument (§7). The
-        // live feed writes it; the paper trading loop (§8) and risk staleness checks (§14) read it.
+        // Last-price cache: shared, thread-safe snapshot of the newest price per instrument.
+        // The live feed writes it; the paper trading loop and risk staleness checks read it.
         services.AddSingleton<ILastPriceCache, LastPriceCache>();
 
         services.AddHttpClient<KiteHistoricalDataProvider>((serviceProvider, client) =>
@@ -45,15 +46,24 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(broker.RequestTimeoutSeconds);
         });
 
-        // Historical download provider is deliberately separate from the broker/order adapter.
-        services.AddScoped<IHistoricalDataProvider>(sp => sp.GetRequiredService<KiteHistoricalDataProvider>());
+        // Historical data provider: conditionally register Jugaad or Kite
+        services.AddScoped<IHistoricalDataProvider>(sp =>
+        {
+            var marketDataSettings = sp.GetRequiredService<IOptions<MarketDataSettings>>().Value;
+            if (string.Equals(marketDataSettings.HistoricalProvider, "Jugaad", StringComparison.OrdinalIgnoreCase))
+            {
+                return new JugaadHistoricalDataProvider(
+                    sp.GetRequiredService<IOptions<MarketDataSettings>>(),
+                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<JugaadHistoricalDataProvider>>());
+            }
 
-        // WebSocket market data provider: singleton (one connection per app). Full live streaming
-        // is operationalised in Phase 10; registration here keeps the market-data boundary stable.
+            return sp.GetRequiredService<KiteHistoricalDataProvider>();
+        });
+
+        // WebSocket market data provider: singleton (one connection per app).
         services.AddSingleton<ILiveMarketDataProvider, KiteWebSocketMarketDataProvider>();
 
-        // The service owns a scoped persistence repository. A later hosted live-feed worker can
-        // create an explicit scope per processing batch rather than retaining a DbContext.
+        // The service owns a scoped persistence repository.
         services.AddScoped<MarketDataService>();
 
         return services;

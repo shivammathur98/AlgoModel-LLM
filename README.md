@@ -40,6 +40,17 @@ AlgoTrader.Api             -> Composition root, health/status endpoints
 - **Risk before every entry** (Sec 14): a stateless pre-trade risk engine vetoes risk-increasing orders; the same `RiskAwarePositionSizer` is shared by backtest, paper, and live.
 - **One execution path** (Sec 25): every order flows through `OrderExecutionEngine`, is persisted (even rejections, for audit), and real transmission is triple-gate re-checked at send time.
 
+## Free Historical Data (`jugaad-data`)
+
+The platform integrates with the open-source Python [`jugaad-data`](https://github.com/jugaad-py/jugaad-data) library for free historical daily candle data from the NSE, bypassing the need for a paid Kite Historical API subscription for daily swing testing.
+
+To use it:
+1. Ensure the python CLI tool is installed: `pip install jugaad-data`
+2. In `appsettings.json`, set `"HistoricalProvider": "Jugaad"`
+3. Define your target symbols in the `Universe.Symbols` array (e.g. `["RELIANCE", "TCS"]`).
+
+When backtesting, the system dynamically spins up the `jdata` CLI process, generates synthetic instrument tokens, and maps the CSV directly into the engine's domain models.
+
 ## Running the API
 
 ```bash

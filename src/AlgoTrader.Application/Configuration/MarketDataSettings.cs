@@ -21,7 +21,12 @@ public sealed class MarketDataSettings
     [Range(1, 300)]
     public int HistoricalFetchPageSize { get; set; } = 100;
 
-    /// <summary>Instrument universe configuration. Configurable, never hardcoded (§9).</summary>
+    /// <summary>
+    /// Which historical data provider to use: "Kite" or "Jugaad".
+    /// </summary>
+    public string HistoricalProvider { get; set; } = "Kite";
+
+    /// <summary>Instrument universe configuration. Configurable, never hardcoded.</summary>
     public UniverseSettings Universe { get; set; } = new();
 }
 

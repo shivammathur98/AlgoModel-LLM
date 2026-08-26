@@ -50,7 +50,7 @@ public sealed class BacktestEngine
             if (pendingSignals.Remove(candle.InstrumentToken, out var pendingSignal))
             {
                 var scheduledDate = DateOnly.FromDateTime(pendingSignal.TimestampUtc.ToOffset(IndiaStandardTimeOffset).DateTime);
-                if (scheduledDate != localDate)
+                if (request.Product != ProductType.Delivery && scheduledDate != localDate)
                 {
                     rejectedSignals.Add(Reject(pendingSignal, BacktestSignalRejectionReason.PendingOrderFromPreviousSession));
                 }
