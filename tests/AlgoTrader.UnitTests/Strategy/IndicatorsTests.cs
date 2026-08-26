@@ -93,6 +93,25 @@ public sealed class IndicatorsTests
     }
 
     [Fact]
+    public void Atr_AppliesWilderSmoothing_BeyondTheSeed()
+    {
+        // Four candles, period 2, so the Wilder recursion runs once past the seed (the 3-candle test
+        // above only pins the seed). Independently confirmed by hand and by the Phase-8 audit oracle.
+        // TR1 = max(12-9, |12-9|, |9-9|)    = 3
+        // TR2 = max(13-10, |13-11|, |10-11|) = 3   -> seed ATR(2) = (3+3)/2 = 3
+        // TR3 = max(11-7,  |11-10|, |7-10|)  = 4   -> atr = (3*(2-1) + 4)/2 = 3.5
+        var candles = new[]
+        {
+            Candle(0, low: 8m, high: 10m, close: 9m),
+            Candle(1, low: 9m, high: 12m, close: 11m),
+            Candle(2, low: 10m, high: 13m, close: 10m),
+            Candle(3, low: 7m, high: 11m, close: 8m)
+        };
+
+        Indicators.Atr(candles, 2).Should().Be(3.5m);
+    }
+
+    [Fact]
     public void Atr_ReturnsNull_WhenNotEnoughCandles()
     {
         var candles = new[] { Candle(0, 8m, 10m, 9m), Candle(1, 9m, 12m, 11m) };

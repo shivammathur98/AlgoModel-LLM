@@ -18,7 +18,7 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("AlgoTrader")
-            ?? "Server=(localdb)\\mssqllocaldb;Database=AlgoTrader;Trusted_Connection=True;TrustServerCertificate=True;";
+            ?? "Server=localhost;Database=AlgoTrader;Trusted_Connection=True;TrustServerCertificate=True;";
 
         services.AddDbContext<AlgoTraderDbContext>(options =>
             options.UseSqlServer(connectionString, sqlOptions =>

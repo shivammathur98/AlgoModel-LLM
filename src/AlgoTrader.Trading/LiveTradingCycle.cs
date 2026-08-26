@@ -44,6 +44,7 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
     private readonly IPositionSizer _sizer;
     private readonly ILiveAccountView _accountView;
     private readonly ICandleAggregator _aggregator;
+    private readonly ILastPriceCache _lastPrices;
     private readonly RiskSettings _riskSettings;
     private readonly Timeframe _timeframe;
     private readonly string _exchange;
@@ -61,6 +62,7 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
         IPositionSizer sizer,
         ILiveAccountView accountView,
         ICandleAggregator aggregator,
+        ILastPriceCache lastPrices,
         IOptions<StrategySettings> strategySettings,
         IOptions<RiskSettings> riskSettings,
         IOptions<MarketDataSettings> marketData,
@@ -73,6 +75,7 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
         _sizer = sizer ?? throw new ArgumentNullException(nameof(sizer));
         _accountView = accountView ?? throw new ArgumentNullException(nameof(accountView));
         _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
+        _lastPrices = lastPrices ?? throw new ArgumentNullException(nameof(lastPrices));
         _riskSettings = riskSettings?.Value ?? throw new ArgumentNullException(nameof(riskSettings));
         _timeframe = strategySettings?.Value.Timeframe ?? throw new ArgumentNullException(nameof(strategySettings));
         _exchange = marketData?.Value.Exchange ?? throw new ArgumentNullException(nameof(marketData));
@@ -115,6 +118,30 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
 
     private async Task OnCandleClosedAsync(IServiceProvider session, Candle closed, CancellationToken cancellationToken)
     {
+        // Data-freshness gate (§8): reject stale candles before they reach the strategy. A candle older than 2×
+        // the bar interval indicates a data gap or delayed post; acting on it would violate "do not trade blindly"
+        // (CLAUDE.md §5). Skip strategy evaluation and log a warning — the position remains unchanged.
+        var nowUtc = DateTimeOffset.UtcNow;
+        var maxStalenessMinutes = _timeframe.Minutes() * 2;
+        var staleness = nowUtc - closed.TimestampUtc;
+        if (staleness.TotalMinutes > maxStalenessMinutes)
+        {
+            _logger.LogWarning(
+                "Rejecting stale candle for {Symbol}: bar start {TimestampUtc} is {StalenessMinutes:F1} minutes old " +
+                "(max {MaxStalenessMinutes}). Skipping strategy evaluation; no orders will be placed.",
+                closed.Symbol, closed.TimestampUtc, staleness.TotalMinutes, maxStalenessMinutes);
+            return;
+        }
+
+        if (staleness.TotalMinutes < -1) // more than 1 minute in the future
+        {
+            _logger.LogWarning(
+                "Rejecting future-dated candle for {Symbol}: bar start {TimestampUtc} is {FutureMinutes:F1} minutes ahead of wall clock. " +
+                "Skipping strategy evaluation.",
+                closed.Symbol, closed.TimestampUtc, -staleness.TotalMinutes);
+            return;
+        }
+
         var token = closed.InstrumentToken;
         _metrics.CandleClosed(TradingMode.Live);
         var history = AppendHistory(token, closed);
@@ -196,6 +223,12 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
         // Every gate is now fed from broker-derived truth: realized P&L and trade count for the day come from the
         // snapshot (recomputed from the local store's filled orders, net of charges), alongside the kill-switch,
         // max-positions, symbol-already-open, session-hours, capital, funds and broker-connectivity gates.
+        var unrealizedPnl = snapshot.OpenPositions.Values.Sum(p => 
+        {
+            var currentPrice = _lastPrices.Get(p.InstrumentToken)?.Price ?? 0m;
+            return currentPrice > 0m ? (currentPrice - p.AveragePrice) * p.Quantity : 0m;
+        });
+
         var riskContext = new RiskEvaluationContext(
             TimestampUtc: decisionTimeUtc,
             AvailableCapital: snapshot.AvailableCash,
@@ -205,7 +238,8 @@ public sealed class LiveTradingCycle : ILiveTradingCycle, IDisposable
             OpenOrderCount: snapshot.InFlightOrderTokens.Count,
             SymbolsWithOpenPositions: snapshot.SymbolsWithOpenPositions,
             IsMarketDataStale: false,
-            IsBrokerConnected: true);
+            IsBrokerConnected: true,
+            UnrealizedPnl: unrealizedPnl);
 
         if (signal.Direction == SignalDirection.LongEntry)
             await HandleEntryAsync(session, signal, closed, snapshot, openPosition, riskContext, cancellationToken).ConfigureAwait(false);

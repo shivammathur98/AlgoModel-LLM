@@ -3,6 +3,7 @@ namespace AlgoTrader.IntegrationTests;
 using System.Net;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 public class HealthAndStatusEndpointTests : IClassFixture<WebApplicationFactory<Program>>
@@ -37,9 +38,31 @@ public class HealthAndStatusEndpointTests : IClassFixture<WebApplicationFactory<
     }
 
     [Fact]
-    public async Task Status_ReturnsModeAndKillSwitchState()
+    public async Task Status_ReturnsUnauthorized_WhenNoApiKey()
     {
         var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/status");
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Status_ReturnsModeAndKillSwitchState_WithValidApiKey()
+    {
+        // Override config to set a test key
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((context, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ApiSettings:AdminApiKey"] = "test-key"
+                });
+            });
+        });
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", "test-key");
+
         var response = await client.GetAsync("/api/status");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);

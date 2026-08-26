@@ -54,8 +54,22 @@ public sealed class ZerodhaEquityCostCalculatorTests
         breakdown.Brokerage.Should().Be(0m);
         breakdown.Stt.Should().Be(10.00m);                      // delivery STT applies to the buy leg too
         breakdown.DpCharges.Should().Be(0m);                    // DP applies to delivery sells only
-        breakdown.StampDuty.Should().Be(0.30m);
-        breakdown.Total.Should().Be(10.67m);                    // 10 STT + 0.30 exch + 0.01 sebi + 0.30 stamp + 0.06 gst
+        breakdown.StampDuty.Should().Be(1.50m);                 // 0.015% delivery buy rate (5× intraday)
+        breakdown.Total.Should().Be(11.87m);                    // 10 STT + 0.30 exch + 0.01 sebi + 1.50 stamp + 0.06 gst
+    }
+
+    [Fact]
+    public void StampDuty_UsesHigherDeliveryRate_ThanIntraday_OnTheBuyLeg()
+    {
+        // Same buy turnover (₹10,000); only the product type differs. Stamp duty must scale with it:
+        // intraday 0.003% ⇒ ₹0.30, delivery 0.015% ⇒ ₹1.50 (5×). Regression guard for COST-1, where a
+        // single intraday rate was applied to delivery buys, understating swing/delivery costs 5×.
+        var intradayBuy = Calc().Calculate(Ctx(OrderSide.Buy, ProductType.Intraday, quantity: 100, price: 100m));
+        var deliveryBuy = Calc().Calculate(Ctx(OrderSide.Buy, ProductType.Delivery, quantity: 100, price: 100m));
+
+        intradayBuy.StampDuty.Should().Be(0.30m);
+        deliveryBuy.StampDuty.Should().Be(1.50m);
+        deliveryBuy.StampDuty.Should().Be(intradayBuy.StampDuty * 5m);
     }
 
     [Fact]

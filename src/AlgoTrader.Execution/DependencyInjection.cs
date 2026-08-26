@@ -1,6 +1,7 @@
 namespace AlgoTrader.Execution;
 
 using AlgoTrader.Application.Configuration;
+using AlgoTrader.Application.Execution;
 using AlgoTrader.Application.Observability;
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Application.Safety;
@@ -23,11 +24,16 @@ public static class DependencyInjection
     /// </summary>
     public static IServiceCollection AddAlgoTraderExecution(this IServiceCollection services)
     {
+        // Singleton: order submission and every asynchronous reconciliation run on independent scopes, so the gate
+        // that serializes their order-state writes must be one shared instance process-wide (AUDIT-0009).
+        services.AddSingleton<IOrderMutationGate, OrderMutationGate>();
         services.AddScoped<IExecutionEngine>(sp => new OrderExecutionEngine(
             sp.GetRequiredService<IOptions<TradingSettings>>().Value,
             sp.GetRequiredService<ITradingBroker>(),
             sp.GetRequiredService<LiveTradingSafetyValidator>(),
+            sp.GetRequiredService<IKillSwitch>(),
             sp.GetRequiredService<IOrderRepository>(),
+            sp.GetRequiredService<IOrderMutationGate>(),
             sp.GetRequiredService<ISystemClock>(),
             sp.GetRequiredService<ILogger<OrderExecutionEngine>>(),
             sp.GetRequiredService<ITradingMetrics>()));

@@ -47,7 +47,8 @@ public sealed record RiskEvaluationContext(
     int OpenOrderCount,
     IReadOnlySet<string> SymbolsWithOpenPositions,
     bool IsMarketDataStale,
-    bool IsBrokerConnected);
+    bool IsBrokerConnected,
+    decimal UnrealizedPnl = 0m);
 
 /// <summary>
 /// The risk engine has authority to reject any signal or order (§14).

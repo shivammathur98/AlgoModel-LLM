@@ -8,10 +8,15 @@ using Microsoft.EntityFrameworkCore;
 [Table("Orders")]
 [Index(nameof(BrokerOrderId))]
 [Index(nameof(CorrelationId))]
+[Index(nameof(CreatedAtUtc))]
+[Index(nameof(State))]
 public class OrderEntity
 {
     [Key]
     public long Id { get; set; }
+
+    [Timestamp]
+    public byte[]? RowVersion { get; set; }
 
     /// <summary>Broker-assigned order ID (null until submitted).</summary>
     [StringLength(100)]
@@ -73,6 +78,4 @@ public class OrderEntity
 
     public DateTimeOffset? FilledAtUtc { get; set; }
 
-    // Navigation
-    public ICollection<OrderExecutionEntity> Executions { get; set; } = new List<OrderExecutionEntity>();
 }

@@ -18,6 +18,9 @@ public interface ITradingBroker
     /// <summary>True when a valid broker session/access token is available.</summary>
     bool IsAuthenticated { get; }
 
+    /// <summary>True when the order stream is connected.</summary>
+    bool IsConnected { get; }
+
     /// <summary>Establishes or refreshes the broker session.</summary>
     Task AuthenticateAsync(CancellationToken cancellationToken = default);
 
@@ -50,4 +53,7 @@ public interface ITradingBroker
 
     /// <summary>Raised for asynchronous order status updates (order subscription, §4).</summary>
     event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+
+    /// <summary>Raised if the asynchronous order postback stream drops.</summary>
+    event EventHandler<EventArgs>? StreamDisconnected;
 }

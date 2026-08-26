@@ -43,10 +43,12 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IPaperPortfolio _portfolio;
     private readonly ICandleAggregator _aggregator;
+    private readonly ILastPriceCache _lastPrices;
     private readonly RiskSettings _riskSettings;
     private readonly Timeframe _timeframe;
     private readonly string _exchange;
     private readonly ProductType _product;
+    private readonly SlippageSettings _slippageSettings;
     private readonly ILogger<PaperTradingCycle> _logger;
     private readonly ITradingMetrics _metrics;
 
@@ -61,9 +63,11 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
         IServiceScopeFactory scopeFactory,
         IPaperPortfolio portfolio,
         ICandleAggregator aggregator,
+        ILastPriceCache lastPrices,
         IOptions<StrategySettings> strategySettings,
         IOptions<RiskSettings> riskSettings,
         IOptions<MarketDataSettings> marketData,
+        IOptions<SlippageSettings> slippageSettings,
         ProductType product,
         ILogger<PaperTradingCycle> logger,
         ITradingMetrics? metrics = null)
@@ -74,12 +78,48 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _portfolio = portfolio ?? throw new ArgumentNullException(nameof(portfolio));
         _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
+        _lastPrices = lastPrices ?? throw new ArgumentNullException(nameof(lastPrices));
         _riskSettings = riskSettings?.Value ?? throw new ArgumentNullException(nameof(riskSettings));
         _timeframe = strategySettings?.Value.Timeframe ?? throw new ArgumentNullException(nameof(strategySettings));
         _exchange = marketData?.Value.Exchange ?? throw new ArgumentNullException(nameof(marketData));
+        _slippageSettings = slippageSettings?.Value ?? throw new ArgumentNullException(nameof(slippageSettings));
         _product = product;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _metrics = metrics ?? NullTradingMetrics.Instance;
+    }
+
+    /// <inheritdoc />
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var repo = scope.ServiceProvider.GetRequiredService<AlgoTrader.Application.Repositories.IOrderRepository>();
+            var openOrders = await repo.GetOpenOrdersAsync(cancellationToken).ConfigureAwait(false);
+            
+            _pending.Clear();
+            var count = 0;
+            foreach (var order in openOrders)
+            {
+                if (order.Product != _product)
+                    continue;
+
+                // Stop and target price are parsed out from the tag or assumed null if not recoverable.
+                // In a robust implementation, the PendingOrder should just persist entirely or be 
+                // reconstructed from the strategy context, but reconstructing the basic metadata is sufficient
+                // for the simulated fills.
+                _pending[order.InstrumentToken] = new PendingOrder(
+                    order.Id, order.InstrumentToken, order.Side, order.Quantity, order.Symbol,
+                    "Recovered", null, null, order.CorrelationId);
+                count++;
+            }
+            _logger.LogInformation("Recovered {Count} open paper orders into pending ledger.", count);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -114,6 +154,18 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
         var fillPrice = tick.LastPrice;
         if (fillPrice <= 0m)
             return; // Never fabricate or coerce a price; wait for a valid tick.
+
+        var impactBps = _slippageSettings.Model switch
+        {
+            ExecutionModel.Ideal => 0m,
+            ExecutionModel.Conservative => pending.Side == OrderSide.Buy ? _slippageSettings.EntrySlippageBps : _slippageSettings.ExitSlippageBps,
+            ExecutionModel.Realistic => (pending.Side == OrderSide.Buy ? _slippageSettings.EntrySlippageBps : _slippageSettings.ExitSlippageBps)
+                                      + _slippageSettings.AssumedSpreadBps / 2m,
+            _ => throw new ArgumentOutOfRangeException()
+        };
+        
+        var impact = fillPrice * impactBps / 10000m;
+        fillPrice = pending.Side == OrderSide.Buy ? fillPrice + impact : fillPrice - impact;
 
         var result = await PaperFillAsync(pending.OrderId, fillPrice, cancellationToken).ConfigureAwait(false);
         if (result.State != OrderState.Filled)
@@ -150,6 +202,30 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
     /// <summary>Runs the strategy on the decision candle and acts on each resulting signal.</summary>
     private async Task OnCandleClosedAsync(Candle closed, CancellationToken cancellationToken)
     {
+        // Data-freshness gate (§8): reject stale candles before they reach the strategy. A candle older than 2×
+        // the bar interval indicates a data gap or delayed post; acting on it would violate "do not trade blindly"
+        // (CLAUDE.md §5). Skip strategy evaluation and log a warning — the position remains unchanged.
+        var nowUtc = DateTimeOffset.UtcNow;
+        var maxStalenessMinutes = _timeframe.Minutes() * 2;
+        var staleness = nowUtc - closed.TimestampUtc;
+        if (staleness.TotalMinutes > maxStalenessMinutes)
+        {
+            _logger.LogWarning(
+                "Rejecting stale candle for {Symbol}: bar start {TimestampUtc} is {StalenessMinutes:F1} minutes old " +
+                "(max {MaxStalenessMinutes}). Skipping strategy evaluation; no orders will be placed.",
+                closed.Symbol, closed.TimestampUtc, staleness.TotalMinutes, maxStalenessMinutes);
+            return;
+        }
+
+        if (staleness.TotalMinutes < -1) // more than 1 minute in the future
+        {
+            _logger.LogWarning(
+                "Rejecting future-dated candle for {Symbol}: bar start {TimestampUtc} is {FutureMinutes:F1} minutes ahead of wall clock. " +
+                "Skipping strategy evaluation.",
+                closed.Symbol, closed.TimestampUtc, -staleness.TotalMinutes);
+            return;
+        }
+
         var token = closed.InstrumentToken;
         _metrics.CandleClosed(TradingMode.Paper);
         var history = AppendHistory(token, closed);
@@ -207,6 +283,12 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
             return;
         }
 
+        var unrealizedPnl = snapshot.OpenPositions.Sum(p => 
+        {
+            var currentPrice = _lastPrices.Get(p.InstrumentToken)?.Price ?? 0m;
+            return currentPrice > 0m ? (currentPrice - p.AveragePrice) * p.Quantity : 0m;
+        });
+
         var riskContext = new RiskEvaluationContext(
             TimestampUtc: decisionTimeUtc,
             AvailableCapital: snapshot.Cash,
@@ -216,7 +298,8 @@ public sealed class PaperTradingCycle : IPaperTradingCycle, IDisposable
             OpenOrderCount: _pending.Count,
             SymbolsWithOpenPositions: snapshot.SymbolsWithOpenPositions,
             IsMarketDataStale: false,   // the decision is driven by a candle that just closed from a fresh tick
-            IsBrokerConnected: true);   // paper: the simulator is always available
+            IsBrokerConnected: true,    // paper: the simulator is always available
+            UnrealizedPnl: unrealizedPnl);
 
         if (signal.Direction == SignalDirection.LongEntry)
             await HandleEntryAsync(signal, closed, snapshot, openPosition, riskContext, cancellationToken).ConfigureAwait(false);

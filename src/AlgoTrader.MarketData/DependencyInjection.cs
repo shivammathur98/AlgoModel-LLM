@@ -15,14 +15,20 @@ public static class DependencyInjection
     public static IServiceCollection AddAlgoTraderMarketData(this IServiceCollection services)
     {
         // Symbol resolver: resolves instrument token → (symbol, exchange) via a scoped repository.
-        services.AddSingleton<Func<int, (string Symbol, string Exchange)>>(sp => token =>
+        services.AddSingleton<Func<int, (string Symbol, string Exchange)>>(sp => 
         {
-            using var scope = sp.CreateScope();
-            var repo = scope.ServiceProvider.GetRequiredService<IInstrumentRepository>();
-            var instrument = repo.GetByTokenAsync(token).GetAwaiter().GetResult();
-            return instrument != null
-                ? (instrument.Symbol, instrument.Exchange)
-                : ($"TOKEN_{token}", "NSE");
+            var cache = new System.Collections.Concurrent.ConcurrentDictionary<int, (string Symbol, string Exchange)>();
+            Func<int, (string Symbol, string Exchange)> resolver = token => 
+                cache.GetOrAdd(token, t =>
+                {
+                    using var scope = sp.CreateScope();
+                    var repo = scope.ServiceProvider.GetRequiredService<IInstrumentRepository>();
+                    var instrument = repo.GetByTokenAsync(t).GetAwaiter().GetResult();
+                    if (instrument != null)
+                        return (instrument.Symbol, instrument.Exchange);
+                    return ($"TOKEN_{t}", "NSE");
+                });
+            return resolver;
         });
 
         // Candle aggregator: stateful singleton that aggregates ticks into candles.

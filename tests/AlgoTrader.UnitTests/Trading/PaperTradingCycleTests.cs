@@ -28,7 +28,7 @@ public sealed class PaperTradingCycleTests
 {
     private const int Token = 111;
     private const string Symbol = "INFY";
-    private static readonly DateTimeOffset T0 = new(2026, 8, 24, 4, 30, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset T0 = DateTimeOffset.UtcNow;
 
     // ---- Entry ------------------------------------------------------------
 
@@ -74,6 +74,39 @@ public sealed class PaperTradingCycleTests
         var snapshot = h.Portfolio.Snapshot(T0);
         snapshot.Cash.Should().Be(100_000m - (100m * 300 + 20m)); // deployed + one leg of flat charges
         snapshot.TradesToday.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task RestingEntry_WithRealisticSlippage_FillsWithSpreadAndSlippageApplied()
+    {
+        var h = new Harness();
+        // Overwrite the cycle with a Realistic model slippage setting
+        var cycleWithSlippage = new PaperTradingCycle(
+            h.Strategy,
+            h.Risk,
+            new RiskAwarePositionSizer(),
+            (IServiceScopeFactory)h.Cycle.GetType().GetField("_scopeFactory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(h.Cycle)!,
+            h.Portfolio,
+            h.Aggregator,
+            new AlgoTrader.MarketData.LastPriceCache(),
+            Options.Create(new StrategySettings { Timeframe = Timeframe.Minute1 }),
+            Options.Create(new RiskSettings()),
+            Options.Create(new MarketDataSettings { Exchange = "NSE" }),
+            Options.Create(new SlippageSettings { Model = ExecutionModel.Realistic, EntrySlippageBps = 5m, AssumedSpreadBps = 3m }),
+            ProductType.Intraday,
+            NullLogger<PaperTradingCycle>.Instance,
+            h.Metrics);
+
+        h.Strategy.OnClose = _ => new[] { Entry(entry: 100m, stop: 95m, target: 110m) };
+        h.Aggregator.Enqueue(CandleAt(T0, close: 100m));
+
+        await cycleWithSlippage.OnTickAsync(TickAt(T0, 100m));
+        await cycleWithSlippage.OnTickAsync(TickAt(T0.AddSeconds(30), 100m));
+
+        var position = h.Portfolio.GetOpenPosition(Token);
+        position.Should().NotBeNull();
+        // 5 bps slippage + 1.5 bps half-spread = 6.5 bps = 0.00065. 100 * (1 + 0.00065) = 100.065
+        position!.AveragePrice.Should().Be(100.065m);
     }
 
     [Fact]
@@ -259,9 +292,11 @@ public sealed class PaperTradingCycleTests
                 provider.GetRequiredService<IServiceScopeFactory>(),
                 Portfolio,
                 Aggregator,
+                new AlgoTrader.MarketData.LastPriceCache(),
                 Options.Create(new StrategySettings { Timeframe = Timeframe.Minute1 }),
                 Options.Create(new RiskSettings()),
                 Options.Create(new MarketDataSettings { Exchange = "NSE" }),
+                Options.Create(new SlippageSettings { Model = ExecutionModel.Ideal }),
                 ProductType.Intraday,
                 NullLogger<PaperTradingCycle>.Instance,
                 Metrics);

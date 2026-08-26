@@ -3,6 +3,7 @@ namespace AlgoTrader.Risk;
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Safety;
 using AlgoTrader.Domain.Enums;
+using AlgoTrader.Domain.MarketData;
 using AlgoTrader.Domain.Orders;
 using AlgoTrader.Domain.Risk;
 using AlgoTrader.Domain.Trading;
@@ -45,12 +46,14 @@ public sealed class RiskEngine : IRiskEngine
 
     private readonly RiskSettings _settings;
     private readonly IKillSwitch _killSwitch;
+    private readonly ILastPriceCache _lastPrices;
     private readonly ILogger<RiskEngine> _logger;
 
-    public RiskEngine(RiskSettings settings, IKillSwitch killSwitch, ILogger<RiskEngine> logger)
+    public RiskEngine(RiskSettings settings, IKillSwitch killSwitch, ILastPriceCache lastPrices, ILogger<RiskEngine> logger)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _killSwitch = killSwitch ?? throw new ArgumentNullException(nameof(killSwitch));
+        _lastPrices = lastPrices ?? throw new ArgumentNullException(nameof(lastPrices));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -99,9 +102,9 @@ public sealed class RiskEngine : IRiskEngine
         if (EvaluateEntryBudget(context, order.Symbol, order.CorrelationId) is { } budgetBlock)
             return Task.FromResult(budgetBlock);
 
-        // Monetary checks need a reference price. Market orders carry none; their notional is bounded by
-        // the position sizer (which sized against capital/exposure) rather than re-checked here.
-        if (order.Price is { } price && price > 0m)
+        var price = order.Price ?? _lastPrices.Get(order.InstrumentToken)?.Price ?? 0m;
+        
+        if (price > 0m)
         {
             var notional = price * order.Quantity;
 
@@ -139,18 +142,21 @@ public sealed class RiskEngine : IRiskEngine
             return Reject(RiskRejectionReason.OutsideTradingHours,
                 $"Timestamp {context.TimestampUtc:o} is outside the trading session.", correlationId);
 
-        // Realized P&L is negative for a loss; a breach is a loss at or beyond the configured magnitude.
-        if (context.RealizedPnlToday <= -_settings.MaxDailyLoss)
+        // Total P&L (Realized + Unrealized) is negative for a loss; a breach is a loss at or beyond the configured magnitude.
+        var totalPnl = context.RealizedPnlToday + context.UnrealizedPnl;
+        if (totalPnl <= -_settings.MaxDailyLoss)
             return Reject(RiskRejectionReason.MaxDailyLossBreached,
-                $"Realized daily loss {context.RealizedPnlToday} breached limit {_settings.MaxDailyLoss}.", correlationId);
+                $"Total daily loss {totalPnl} (Realized: {context.RealizedPnlToday}, Unrealized: {context.UnrealizedPnl}) breached limit {_settings.MaxDailyLoss}.", correlationId);
 
-        if (context.TradesToday >= _settings.MaxTradesPerDay)
+        var totalTrades = context.TradesToday + context.OpenOrderCount;
+        if (totalTrades >= _settings.MaxTradesPerDay)
             return Reject(RiskRejectionReason.MaxTradesPerDayBreached,
-                $"Trades today {context.TradesToday} reached limit {_settings.MaxTradesPerDay}.", correlationId);
+                $"Trades today ({context.TradesToday} filled + {context.OpenOrderCount} pending) reached limit {_settings.MaxTradesPerDay}.", correlationId);
 
-        if (context.OpenPositionCount >= _settings.MaxSimultaneousPositions)
+        var totalPositions = context.OpenPositionCount + context.OpenOrderCount;
+        if (totalPositions >= _settings.MaxSimultaneousPositions)
             return Reject(RiskRejectionReason.MaxSimultaneousPositionsBreached,
-                $"Open positions {context.OpenPositionCount} reached limit {_settings.MaxSimultaneousPositions}.", correlationId);
+                $"Open positions ({context.OpenPositionCount} filled + {context.OpenOrderCount} pending) reached limit {_settings.MaxSimultaneousPositions}.", correlationId);
 
         if (context.SymbolsWithOpenPositions.Contains(symbol))
             return Reject(RiskRejectionReason.SymbolAlreadyOpen, $"A position in {symbol} is already open.", correlationId);

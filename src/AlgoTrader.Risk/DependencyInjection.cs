@@ -21,6 +21,7 @@ public static class DependencyInjection
         services.AddSingleton<IRiskEngine>(sp => new RiskEngine(
             sp.GetRequiredService<IOptions<RiskSettings>>().Value,
             sp.GetRequiredService<Application.Safety.IKillSwitch>(),
+            sp.GetRequiredService<AlgoTrader.Domain.MarketData.ILastPriceCache>(),
             sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<RiskEngine>>()));
 
         // Position sizing (§13) is a separate, stateless concern from pre-trade veto: the trading loop uses it to

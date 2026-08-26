@@ -39,19 +39,20 @@ public static class DependencyInjection
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<IPaperPortfolio>(),
             sp.GetRequiredService<ICandleAggregator>(),
+            sp.GetRequiredService<ILastPriceCache>(),
             sp.GetRequiredService<IOptions<StrategySettings>>(),
             sp.GetRequiredService<IOptions<RiskSettings>>(),
             sp.GetRequiredService<IOptions<MarketDataSettings>>(),
+            sp.GetRequiredService<IOptions<SlippageSettings>>(),
             ProductType.Intraday,
             sp.GetRequiredService<ILogger<PaperTradingCycle>>(),
             sp.GetRequiredService<ITradingMetrics>()));
 
         // Live account state (§26): broker-truth positions/funds plus local order provenance, for the live
-        // decision cycle. Stateless — a singleton assembler the cycle hands its session-scope broker/repo to.
-        services.AddSingleton<ILiveAccountView, LiveAccountView>();
+        // execution cycle. Transient (a new one per snapshot) wrapping the singleton cost calculator.
+        services.AddTransient<ILiveAccountView, LiveAccountView>();
 
-        // Daily reconciliation (§26, §28): compares our local order/position record against broker truth. A
-        // stateless, read-only assembler; run against the authenticated session broker (e.g. at end of day).
+        // Live reconciler (§15, §20): end-of-day checks and kill-switch fallback. A stateless, read-only assembler; run against the authenticated session broker (e.g. at end of day).
         services.AddSingleton<ILiveReconciler, LiveReconciler>();
 
         // Live decision cycle (§8, §11, §26). Singleton, mirroring the paper cycle. It takes NO scope factory:
@@ -63,6 +64,7 @@ public static class DependencyInjection
             sp.GetRequiredService<IPositionSizer>(),
             sp.GetRequiredService<ILiveAccountView>(),
             sp.GetRequiredService<ICandleAggregator>(),
+            sp.GetRequiredService<ILastPriceCache>(),
             sp.GetRequiredService<IOptions<StrategySettings>>(),
             sp.GetRequiredService<IOptions<RiskSettings>>(),
             sp.GetRequiredService<IOptions<MarketDataSettings>>(),

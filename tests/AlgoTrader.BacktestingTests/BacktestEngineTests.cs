@@ -89,6 +89,80 @@ public sealed class BacktestEngineTests
         result.FinalCapital.Should().Be(1_010m);
     }
 
+    [Fact]
+    public void Run_FillsAGappedDownStopAtTheCandleOpenNotTheUntouchedStopLevel()
+    {
+        // Entry fills at 100 on candle 2; candle 3 gaps straight through the 98 stop, opening at 95.
+        // The 98 level was never actually available — the exit must fill at the gapped open (95),
+        // not the optimistic stop price. Under the pre-fix engine this returned 98 (FinalCapital 980).
+        var start = IstCandleStart(9, 15);
+        var result = Run(new[]
+        {
+            Candle(start, 100m, 101m, 99m, 100m),
+            Candle(start.AddMinutes(5), 100m, 101m, 99m, 100m),
+            Candle(start.AddMinutes(10), 95m, 96m, 94m, 95m)
+        });
+
+        result.Trades.Should().ContainSingle();
+        var trade = result.Trades[0];
+        trade.ExitReason.Should().Be("StopLoss");
+        trade.ExitPrice.Should().Be(95m);
+        result.FinalCapital.Should().Be(950m);
+    }
+
+    [Fact]
+    public void Run_FillsAGappedUpTargetAtTheCandleOpenNotTheUntouchedTargetLevel()
+    {
+        // Symmetric to the stop case: candle 3 gaps above the 104 target, opening at 110. A long exit
+        // that gaps in the trader's favour fills at the better price (110), not the stale target (104).
+        var start = IstCandleStart(9, 15);
+        var result = Run(new[]
+        {
+            Candle(start, 100m, 101m, 99m, 100m),
+            Candle(start.AddMinutes(5), 100m, 101m, 99m, 100m),
+            Candle(start.AddMinutes(10), 110m, 111m, 109m, 110m)
+        });
+
+        result.Trades.Should().ContainSingle();
+        var trade = result.Trades[0];
+        trade.ExitReason.Should().Be("Target");
+        trade.ExitPrice.Should().Be(110m);
+        result.FinalCapital.Should().Be(1_100m);
+    }
+
+    [Fact]
+    public void Run_DoesNotLetAStrategyObserveFutureCandlesThroughARetainedHistoryReference()
+    {
+        // A strategy that captures the candle collection it is handed must never see it grow underneath
+        // it on later iterations. The pre-fix engine passed a live view over the mutable history list,
+        // so the reference captured on candle 1 later reported 3 candles — a look-ahead leak.
+        var start = IstCandleStart(9, 15);
+        var strategy = new HistoryAliasProbeStrategy();
+        new BacktestEngine().Run(new BacktestRunRequest(
+            strategy,
+            new[]
+            {
+                Candle(start, 100m, 101m, 99m, 100m),
+                Candle(start.AddMinutes(5), 101m, 102m, 100m, 101m),
+                Candle(start.AddMinutes(10), 102m, 103m, 101m, 102m)
+            },
+            InitialCapital: 1_000m,
+            PositionSizer: new RiskAwarePositionSizer(),
+            PositionSizing: new BacktestPositionSizingSettings(
+                MaxCapitalPerTrade: 1_000m,
+                MaxRiskPerTrade: 100m,
+                MaxExposurePerSymbol: 1_000m,
+                Method: PositionSizingMethod.FixedCapital),
+            ExecutionModel: new CandleExecutionModel(new CandleExecutionSettings(ExecutionModel.Ideal)),
+            CostCalculator: new ZeroCostCalculator(),
+            EndOfDayExitTimeIst: null));
+
+        strategy.CapturedView.Should().NotBeNull();
+        strategy.CapturedViewCountObservedOnCandleThree.Should().Be(1);
+        strategy.CapturedView!.Count.Should().Be(1);
+        strategy.CapturedView[0].TimestampUtc.Should().Be(start);
+    }
+
     private static BacktestRunResult Run(IReadOnlyList<Candle> candles, TimeOnly? endOfDayExitTime = null) =>
         new BacktestEngine().Run(new BacktestRunRequest(
             new FirstCandleEntryStrategy(),
@@ -124,5 +198,26 @@ public sealed class BacktestEngineTests
     private sealed class ZeroCostCalculator : ITradingCostCalculator
     {
         public TradingCostBreakdown Calculate(CostCalculationContext context) => new(0m, 0m, 0m, 0m, 0m, 0m, 0m, 0m);
+    }
+
+    // Captures the candle collection handed to it on candle 1 and re-reads that same reference on
+    // candle 3. A correct engine hands out an immutable snapshot, so the captured view still reports
+    // exactly one candle; a leaky engine that shares its mutable history makes it report three.
+    private sealed class HistoryAliasProbeStrategy : IStrategy
+    {
+        public string Name => "HistoryAliasProbe";
+        public string Version => "1.0.0";
+
+        public IReadOnlyList<Candle>? CapturedView { get; private set; }
+        public int CapturedViewCountObservedOnCandleThree { get; private set; } = -1;
+
+        public IReadOnlyList<Signal> OnCandleClosed(StrategyContext context)
+        {
+            if (context.Candles.Count == 1)
+                CapturedView = context.Candles;
+            else if (context.Candles.Count == 3 && CapturedView is not null)
+                CapturedViewCountObservedOnCandleThree = CapturedView.Count;
+            return [];
+        }
     }
 }

@@ -341,6 +341,9 @@ public sealed class LiveAccountViewTests
 
 #pragma warning disable CS0067 // Not raised in these tests.
         public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+        public event EventHandler<EventArgs>? StreamDisconnected;
+        public bool IsConnected => true;
+
 #pragma warning restore CS0067
     }
 
@@ -363,3 +366,4 @@ public sealed class LiveAccountViewTests
         public Task<IReadOnlyList<Order>> GetByCorrelationIdAsync(string correlationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
+

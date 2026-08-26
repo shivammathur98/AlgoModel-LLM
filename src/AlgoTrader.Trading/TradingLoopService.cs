@@ -1,4 +1,4 @@
-namespace AlgoTrader.Trading;
+﻿namespace AlgoTrader.Trading;
 
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Observability;
@@ -14,17 +14,17 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 /// <summary>
-/// The paper/live trading loop (§8, §11) — the first and only <see cref="BackgroundService"/> in the
+/// The paper/live trading loop (Â§8, Â§11) â€” the first and only <see cref="BackgroundService"/> in the
 /// solution. It owns the live-market-data session for the trading day: it connects the feed, subscribes
-/// the configured instrument universe (§9), and records every tick's last price in the shared
+/// the configured instrument universe (Â§9), and records every tick's last price in the shared
 /// <see cref="ILastPriceCache"/> so downstream components can fill and evaluate against current prices.
 /// <para>
 /// <b>What it does.</b> In Paper mode it drives the full decision cycle from the tick stream via
-/// <see cref="IPaperTradingCycle"/> — strategy → risk → sizing → simulated execution, with price-fed fills
+/// <see cref="IPaperTradingCycle"/> â€” strategy â†’ risk â†’ sizing â†’ simulated execution, with price-fed fills
 /// booked to the in-memory ledger. In Live mode it drives the decision cycle against broker-truth positions
 /// and funds via <see cref="ILiveTradingCycle"/> (bound to the authenticated session), and reconciles the
 /// resulting asynchronous broker fill/cancel updates
-/// (<see cref="ITradingBroker.OrderUpdated"/> → <see cref="IExecutionEngine.ApplyBrokerUpdateAsync"/>). At
+/// (<see cref="ITradingBroker.OrderUpdated"/> â†’ <see cref="IExecutionEngine.ApplyBrokerUpdateAsync"/>). At
 /// session close it runs an end-of-day reconciliation (<see cref="ILiveReconciler"/>) against broker truth and
 /// engages the kill switch if a critical discrepancy is found.
 /// </para>
@@ -64,7 +64,7 @@ public sealed class TradingLoopService : BackgroundService
     // In-flight decision-cycle tasks. Ticks launch cycles fire-and-forget; shutdown drains these before the
     // session scope is disposed, so no cycle can reach for a disposed provider or submit an order mid-teardown.
     private readonly object _cycleLock = new();
-    private readonly List<Task> _inFlightCycles = new();
+    private readonly HashSet<Task> _inFlightCycles = new();
 
     public TradingLoopService(
         IServiceScopeFactory scopeFactory,
@@ -94,6 +94,8 @@ public sealed class TradingLoopService : BackgroundService
         _metrics = metrics ?? NullTradingMetrics.Instance;
     }
 
+    private readonly SemaphoreSlim _reconnectSignal = new(0, 1);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _stoppingToken = stoppingToken;
@@ -113,7 +115,7 @@ public sealed class TradingLoopService : BackgroundService
             return;
         }
 
-        // Never fabricate credentials (§5). Without them the WebSocket feed cannot authenticate.
+        // Never fabricate credentials (Â§5). Without them the WebSocket feed cannot authenticate.
         if (string.IsNullOrWhiteSpace(_brokerSettings.ApiKey) || string.IsNullOrWhiteSpace(_brokerSettings.AccessToken))
         {
             _logger.LogWarning(
@@ -136,6 +138,8 @@ public sealed class TradingLoopService : BackgroundService
             // Paper mode runs the decision cycle off the in-memory ledger with price-fed fills. Live mode runs
             // its decision cycle against broker-truth state, enabled below only once the broker authenticates.
             _runPaperCycle = _trading.Mode == TradingMode.Paper;
+            if (_runPaperCycle)
+                await _paperCycle.InitializeAsync(stoppingToken).ConfigureAwait(false);
 
             // Live only: authenticate the session broker, then wire async fill/cancel reconciliation and bind the
             // live decision cycle to that authenticated session. Both stay dormant if authentication fails.
@@ -147,13 +151,43 @@ public sealed class TradingLoopService : BackgroundService
             _logger.LogInformation(
                 "Trading loop connected in {Mode} mode; subscribed to {Count} instrument(s).", _trading.Mode, tokens.Length);
 
-            // Ingestion, and in Paper mode the decision cycle, run from the tick-received handler. Hold the
-            // session open until shutdown.
-            await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                await _reconnectSignal.WaitAsync(stoppingToken).ConfigureAwait(false);
+
+                // Reconnect backoff
+                int retries = 0;
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, retries))), stoppingToken);
+                        
+                        if (!_liveFeed.IsConnected)
+                        {
+                            await _liveFeed.ConnectAsync(stoppingToken).ConfigureAwait(false);
+                            await _liveFeed.SubscribeAsync(tokens, stoppingToken).ConfigureAwait(false);
+                        }
+
+                        if (_trading.Mode == TradingMode.Live && _sessionBroker != null && !_sessionBroker!.IsConnected)
+                        {
+                            await _sessionBroker!.AuthenticateAsync(stoppingToken).ConfigureAwait(false);
+                        }
+
+                        _logger.LogInformation("Successfully reconnected feeds.");
+                        break; // break retry loop
+                    }
+                    catch (Exception ex)
+                    {
+                        retries++;
+                        _logger.LogError(ex, "Failed to reconnect. Retrying in {Delay}s...", Math.Min(60, Math.Pow(2, retries)));
+                    }
+                }
+            }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Normal shutdown — fall through to cleanup.
+            // Normal shutdown â€” fall through to cleanup.
         }
         catch (Exception ex)
         {
@@ -166,7 +200,7 @@ public sealed class TradingLoopService : BackgroundService
         }
     }
 
-    /// <summary>Resolves the configured symbol universe (§9) to instrument tokens, skipping any that don't resolve.</summary>
+    /// <summary>Resolves the configured symbol universe (Â§9) to instrument tokens, skipping any that don't resolve.</summary>
     private async Task<IReadOnlyList<int>> ResolveUniverseAsync(CancellationToken cancellationToken)
     {
         var symbols = _marketData.Universe.Symbols;
@@ -212,6 +246,7 @@ public sealed class TradingLoopService : BackgroundService
         }
 
         _sessionBroker.OrderUpdated += OnBrokerOrderUpdate;
+        _sessionBroker.StreamDisconnected += OnStreamDisconnected;
         _logger.LogInformation(
             "Broker order reconciliation wired to the execution engine (provider {Provider}).", _sessionBroker.ProviderName);
 
@@ -279,9 +314,17 @@ public sealed class TradingLoopService : BackgroundService
         }
     }
 
-    private void OnDisconnected(object? sender, MarketDataDisconnectedEventArgs e) =>
-        _logger.LogWarning(
-            "Live market data feed disconnected: {Reason}. Automatic reconnection is a later phase.", e.Reason ?? "unknown");
+    private void OnDisconnected(object? sender, MarketDataDisconnectedEventArgs e)
+    {
+        _logger.LogWarning("Live market data feed disconnected: {Reason}. Triggering reconnect.", e.Reason ?? "unknown");
+        if (_reconnectSignal.CurrentCount == 0) _reconnectSignal.Release();
+    }
+
+    private void OnStreamDisconnected(object? sender, EventArgs e)
+    {
+        _logger.LogWarning("Live order stream disconnected. Triggering reconnect.");
+        if (_reconnectSignal.CurrentCount == 0) _reconnectSignal.Release();
+    }
 
     private void OnBrokerOrderUpdate(object? sender, BrokerOrderUpdate update) =>
         _ = ReconcileBrokerUpdateAsync(update);
@@ -302,11 +345,11 @@ public sealed class TradingLoopService : BackgroundService
 
     /// <summary>
     /// Live only: at session close, reconciles the day's local order/position record against broker truth
-    /// (§26, §28) and logs the outcome. A <b>critical</b> discrepancy — untracked risk or a wrong book — engages
+    /// (Â§26, Â§28) and logs the outcome. A <b>critical</b> discrepancy â€” untracked risk or a wrong book â€” engages
     /// the kill switch, so the platform will not resume trading until an operator has investigated and reset it
-    /// (§15). Runs on the still-authenticated session scope; it never throws, so shutdown always completes. A
+    /// (Â§15). Runs on the still-authenticated session scope; it never throws, so shutdown always completes. A
     /// failure to reconcile (e.g. a transient broker read error at shutdown) is logged but does not engage the
-    /// kill switch — only a confirmed critical drift does.
+    /// kill switch â€” only a confirmed critical drift does.
     /// </summary>
     private async Task ReconcileSessionAsync()
     {
@@ -340,7 +383,7 @@ public sealed class TradingLoopService : BackgroundService
         }
     }
 
-    /// <summary>Emits the reconciliation report as structured log lines — a headline plus one line per discrepancy.</summary>
+    /// <summary>Emits the reconciliation report as structured log lines â€” a headline plus one line per discrepancy.</summary>
     private void LogReconciliation(ReconciliationReport report)
     {
         if (report.IsClean)
@@ -354,7 +397,7 @@ public sealed class TradingLoopService : BackgroundService
         else
             _logger.LogWarning("EOD reconciliation: {Summary}", report.Summary);
 
-        // One structured line per discrepancy. Only order ids/tokens/symbols — no sensitive account data (§5).
+        // One structured line per discrepancy. Only order ids/tokens/symbols â€” no sensitive account data (Â§5).
         foreach (var d in report.Discrepancies)
         {
             var level = d.Severity == ReconciliationSeverity.Critical ? LogLevel.Error : LogLevel.Warning;
@@ -364,7 +407,7 @@ public sealed class TradingLoopService : BackgroundService
         }
     }
 
-    /// <summary>Start of the current IST trading day expressed in UTC — the intraday reconciliation window's lower bound.</summary>
+    /// <summary>Start of the current IST trading day expressed in UTC â€” the intraday reconciliation window's lower bound.</summary>
     private static DateTimeOffset StartOfCurrentIstDay(DateTimeOffset asOfUtc)
     {
         var ist = asOfUtc.ToOffset(IndiaStandardTimeOffset);
@@ -397,7 +440,7 @@ public sealed class TradingLoopService : BackgroundService
             catch { /* each cycle logs its own failure; we only need them finished before disposal. */ }
         }
 
-        // End-of-day reconciliation (§26, §28): verify the day's book against broker truth while the authenticated
+        // End-of-day reconciliation (Â§26, Â§28): verify the day's book against broker truth while the authenticated
         // session scope is still alive. Live-only; never throws (shutdown must complete regardless).
         await ReconcileSessionAsync().ConfigureAwait(false);
 
@@ -418,3 +461,4 @@ public sealed class TradingLoopService : BackgroundService
         _logger.LogInformation("Trading loop stopped.");
     }
 }
+

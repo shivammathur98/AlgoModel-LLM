@@ -10,4 +10,5 @@ public sealed record OpenPosition(
     DateTimeOffset OpenedAtUtc,
     decimal? StopPrice,
     decimal? TargetPrice,
-    string CorrelationId);
+    string CorrelationId,
+    byte[]? Version = null);

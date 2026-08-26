@@ -1,4 +1,4 @@
-namespace AlgoTrader.Persistence.Repositories;
+﻿namespace AlgoTrader.Persistence.Repositories;
 
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Domain.Enums;
@@ -30,6 +30,9 @@ public sealed class OrderRepository : IOrderRepository
         var entity = await _db.Orders.FindAsync(new object[] { order.Id }, cancellationToken);
         if (entity is null) throw new InvalidOperationException($"Order {order.Id} not found.");
 
+        // Set the original row version to participate in EF's concurrency check
+        _db.Entry(entity).Property(e => e.RowVersion).OriginalValue = order.Version;
+
         entity.BrokerOrderId = order.BrokerOrderId;
         entity.State = order.State.ToString();
         entity.FilledQuantity = order.FilledQuantity;
@@ -39,6 +42,9 @@ public sealed class OrderRepository : IOrderRepository
         entity.FilledAtUtc = order.FilledAtUtc;
 
         await _db.SaveChangesAsync(cancellationToken);
+
+        // Capture the newly generated RowVersion so subsequent updates don't falsely fail
+        order.Version = entity.RowVersion;
     }
 
     public async Task<Order?> GetByIdAsync(long id, CancellationToken cancellationToken = default)
@@ -104,7 +110,8 @@ public sealed class OrderRepository : IOrderRepository
         StrategyName = o.StrategyName,
         CreatedAtUtc = o.CreatedAtUtc,
         LastUpdatedAtUtc = o.LastUpdatedAtUtc,
-        FilledAtUtc = o.FilledAtUtc
+        FilledAtUtc = o.FilledAtUtc,
+        RowVersion = o.Version
     };
 
     private static Order ToDomain(OrderEntity e) => new()
@@ -130,6 +137,8 @@ public sealed class OrderRepository : IOrderRepository
         StrategyName = e.StrategyName,
         CreatedAtUtc = e.CreatedAtUtc,
         LastUpdatedAtUtc = e.LastUpdatedAtUtc,
-        FilledAtUtc = e.FilledAtUtc
+        FilledAtUtc = e.FilledAtUtc,
+        Version = e.RowVersion
     };
 }
+

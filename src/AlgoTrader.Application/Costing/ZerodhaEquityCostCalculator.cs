@@ -16,7 +16,7 @@ using AlgoTrader.Domain.Enums;
 /// <item>Brokerage — intraday (MIS): flat / percent / min(flat, percent) per configured method; delivery (CNC): zero.</item>
 /// <item>STT — intraday: SELL leg only at the intraday rate; delivery: BOTH legs at the delivery rate.</item>
 /// <item>Exchange transaction charges &amp; SEBI charges — both legs, on turnover.</item>
-/// <item>Stamp duty — BUY leg only.</item>
+/// <item>Stamp duty — BUY leg only; intraday and delivery use separate rates (delivery is 5× intraday).</item>
 /// <item>GST — applied to brokerage + exchange transaction charges + SEBI charges.</item>
 /// <item>DP charges — delivery SELL only; the returned amount is GST-inclusive.</item>
 /// </list>
@@ -49,7 +49,9 @@ public sealed class ZerodhaEquityCostCalculator : ITradingCostCalculator
         var stt = Round(CalculateStt(turnover, isDelivery, isSell));
         var exchangeTransactionCharges = Round(_settings.ExchangeTransactionChargePercent * turnover);
         var sebiCharges = Round(_settings.SebiChargePercent * turnover);
-        var stampDuty = Round(isBuy ? _settings.StampDutyPercentBuy * turnover : 0m);
+        var stampDuty = Round(isBuy
+            ? (isDelivery ? _settings.StampDutyPercentBuyDelivery : _settings.StampDutyPercentBuy) * turnover
+            : 0m);
         var gst = Round(_settings.GstPercent * (brokerage + exchangeTransactionCharges + sebiCharges));
         var dpCharges = Round(isDelivery && isSell
             ? _settings.DpChargePerDeliverySell * (1m + _settings.DpChargeGstPercent)

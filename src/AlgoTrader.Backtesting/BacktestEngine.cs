@@ -128,7 +128,7 @@ public sealed class BacktestEngine
                 Symbol = candle.Symbol,
                 InstrumentToken = candle.InstrumentToken,
                 Timeframe = candle.Timeframe,
-                Candles = history.AsReadOnly(),
+                Candles = new CandleWindow(history, history.Count),
                 OpenPosition = openPosition,
                 CurrentTimestampUtc = candle.TimestampUtc,
                 AvailableCapital = cash
@@ -197,16 +197,23 @@ public sealed class BacktestEngine
         var hitTarget = position.Signal.TargetPrice is { } target && candle.High >= target;
         if (!hitStop && !hitTarget) return null;
 
+        // A level the candle gapped through cannot fill at that untouched level. The earliest achievable
+        // price is the candle open: a long stop fills at min(open, stop) (a gap-down fills worse than the
+        // stop), a long target fills at max(open, target) (a gap-up fills better than the target). Without
+        // this clamp the engine reports optimistic stop fills and hides overnight-gap risk (§10, §16).
+        var stopExitPrice = position.Signal.StopPrice is { } sp ? Math.Min(candle.Open, sp) : 0m;
+        var targetExitPrice = position.Signal.TargetPrice is { } tp ? Math.Max(candle.Open, tp) : 0m;
+
         if (hitStop && hitTarget)
         {
             return request.IntrabarExitPriority == IntrabarExitPriority.WorstCase
-                ? new SimulatedExit(position.Signal.StopPrice!.Value, "StopLoss")
-                : new SimulatedExit(position.Signal.TargetPrice!.Value, "Target");
+                ? new SimulatedExit(stopExitPrice, "StopLoss")
+                : new SimulatedExit(targetExitPrice, "Target");
         }
 
         return hitStop
-            ? new SimulatedExit(position.Signal.StopPrice!.Value, "StopLoss")
-            : new SimulatedExit(position.Signal.TargetPrice!.Value, "Target");
+            ? new SimulatedExit(stopExitPrice, "StopLoss")
+            : new SimulatedExit(targetExitPrice, "Target");
     }
 
     private static decimal ClosePosition(
@@ -303,4 +310,26 @@ public sealed class BacktestEngine
     }
 
     private sealed record SimulatedExit(decimal ReferencePrice, string Reason);
+
+    /// <summary>
+    /// O(1) read-only view over the first <paramref name="count"/> candles of an instrument's growing
+    /// history. <see cref="Count"/> is frozen at construction, so a strategy that retains this reference
+    /// can never observe candles appended on later iterations — look-ahead is structurally impossible,
+    /// without the O(n²) cost of snapshotting the history on every candle (§10, §11). Relies on the
+    /// engine invariant that a history list is only ever appended to, never reordered or truncated.
+    /// </summary>
+    private sealed class CandleWindow(IReadOnlyList<Candle> source, int count) : IReadOnlyList<Candle>
+    {
+        public Candle this[int index] =>
+            (uint)index < (uint)count ? source[index] : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public int Count => count;
+
+        public IEnumerator<Candle> GetEnumerator()
+        {
+            for (var i = 0; i < count; i++) yield return source[i];
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
 }

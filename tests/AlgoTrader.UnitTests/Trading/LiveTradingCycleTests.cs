@@ -3,6 +3,7 @@ namespace AlgoTrader.UnitTests.Trading;
 using AlgoTrader.Application.Configuration;
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Domain.Broker;
+using AlgoTrader.Domain.Costing;
 using AlgoTrader.Domain.Enums;
 using AlgoTrader.Domain.Execution;
 using AlgoTrader.Domain.MarketData;
@@ -31,7 +32,7 @@ public sealed class LiveTradingCycleTests
 {
     private const int Token = 111;
     private const string Symbol = "INFY";
-    private static readonly DateTimeOffset T0 = new(2026, 8, 24, 4, 30, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset T0 = DateTimeOffset.UtcNow;
 
     // ---- Entry ------------------------------------------------------------
 
@@ -126,6 +127,49 @@ public sealed class LiveTradingCycleTests
     }
 
     [Fact]
+    public async Task Entry_WithAPersistedWorkingOrder_IsNotResubmittedByAFreshCycle_ProvingRestartSafeDedup()
+    {
+        // EXEC-2 / AUDIT-0008 (idempotency, §20): the "at most one working order per instrument" guard is NOT
+        // backed by in-memory cycle state — it is fed by the REAL LiveAccountView, which derives in-flight tokens
+        // from the DURABLE order store (GetOpenOrdersAsync = every non-terminal order). A brand-new cycle with
+        // empty in-memory history — modelling a process restart while an order is still working at the broker —
+        // therefore still sees the persisted order and refuses to stack a duplicate. This is the restart-safe
+        // property that closes AUDIT-0008's "restart clears in-memory state" residual; the sibling test above uses
+        // a fake view, this one exercises the actual view→store composition end-to-end.
+        var broker = new FunctionalBroker(cash: 100_000m);         // flat: no open position at the broker
+        var orders = new SeededOrderRepository(WorkingBuy(Token));  // one persisted, non-terminal order
+        var execution = new RecordingExecutionEngine();
+        var strategy = new ScriptedStrategy { OnClose = _ => new[] { Entry(entry: 100m, stop: 95m, target: 110m) } };
+        var aggregator = new QueueAggregator();
+
+        var provider = new ServiceCollection()
+            .AddSingleton<IExecutionEngine>(execution)
+            .AddSingleton<ITradingBroker>(broker)
+            .AddSingleton<IOrderRepository>(orders)
+            .BuildServiceProvider();
+
+        // A freshly-constructed cycle: no in-memory memory of the working order, exactly as after a restart.
+        var cycle = new LiveTradingCycle(
+            strategy,
+            new ToggleRiskEngine(),
+            new RiskAwarePositionSizer(),
+            new LiveAccountView(new ZeroCostCalculator(), NullLogger<LiveAccountView>.Instance), // the REAL view
+            aggregator,
+            new AlgoTrader.MarketData.LastPriceCache(),
+            Options.Create(new StrategySettings { Timeframe = Timeframe.Minute1 }),
+            Options.Create(new RiskSettings()),
+            Options.Create(new MarketDataSettings { Exchange = "NSE" }),
+            ProductType.Intraday,
+            NullLogger<LiveTradingCycle>.Instance);
+        cycle.Attach(provider);
+
+        aggregator.Enqueue(CandleAt(T0, close: 100m));
+        await cycle.OnTickAsync(TickAt(T0, 100m));
+
+        execution.Submitted.Should().BeEmpty(); // the durable working order alone blocks the re-submission
+    }
+
+    [Fact]
     public async Task Entry_FeedsBrokerDerivedDayFiguresIntoRisk()
     {
         // The daily-loss and trades-per-day gates are only effective if the cycle passes the snapshot's
@@ -215,6 +259,43 @@ public sealed class LiveTradingCycleTests
         h.Execution.Submitted.Should().BeEmpty();
     }
 
+    // ---- Data freshness / stale-data gate (§8) --------------------------
+
+    [Fact]
+    public async Task StaleCandle_IsRejected_StrategyNotEvaluated_NoOrderSubmitted()
+    {
+        // A candle older than 2× the bar interval (here: 1-min bars, so max staleness = 2 min) must be rejected
+        // before reaching the strategy. This guards against delayed posts from broker reconnects or data gaps.
+        var now = DateTimeOffset.UtcNow;
+        var staleCandle = CandleAt(now.AddMinutes(-10), close: 100m); // 10 minutes old — way stale
+
+        var h = new Harness();
+        h.Strategy.OnClose = _ => throw new InvalidOperationException("Strategy should not be called on stale candle!");
+
+        await h.Cycle.OnTickAsync(TickAt(now, 100m)); // feed a tick that closes the stale candle
+
+        h.Strategy.OnCloseCalled.Should().BeFalse("stale candle must not reach strategy");
+        h.Execution.Submitted.Should().BeEmpty("stale candle must not produce orders");
+    }
+
+    [Fact]
+    public async Task FutureCandle_IsRejected_StrategyNotEvaluated_NoOrderSubmitted()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var futureCandle = CandleAt(now.AddMinutes(10), close: 100m); // 10 minutes in the future
+
+        var h = new Harness();
+        h.Strategy.OnClose = _ => throw new InvalidOperationException("Strategy should not be called on future candle!");
+
+        // Enqueue the future candle into the fake aggregator
+        h.Aggregator.Enqueue(futureCandle);
+
+        await h.Cycle.OnTickAsync(TickAt(now, 100m)); 
+
+        h.Strategy.OnCloseCalled.Should().BeFalse("future candle must not reach strategy");
+        h.Execution.Submitted.Should().BeEmpty("future candle must not produce orders");
+    }
+
     // ---- Signals / market data helpers -----------------------------------
 
     private static Signal Entry(decimal entry, decimal? stop, decimal? target) =>
@@ -231,6 +312,23 @@ public sealed class LiveTradingCycleTests
 
     private static Candle CandleAt(DateTimeOffset at, decimal close) =>
         new(Token, Symbol, "NSE", Timeframe.Minute1, at, close, close, close, close, Volume: 1_000);
+
+    /// <summary>A persisted, still-open order at the broker (non-terminal ⇒ surfaces as in-flight via the store).</summary>
+    private static Order WorkingBuy(int token) =>
+        new()
+        {
+            InstrumentToken = token,
+            Symbol = Symbol,
+            Exchange = "NSE",
+            Side = OrderSide.Buy,
+            Type = OrderType.Market,
+            Product = ProductType.Intraday,
+            Quantity = 300,
+            State = OrderState.Open, // non-terminal → GetOpenOrdersAsync returns it → derived in-flight
+            CorrelationId = "working",
+            CreatedAtUtc = T0.AddMinutes(-1),
+            LastUpdatedAtUtc = T0.AddMinutes(-1)
+        };
 
     // ---- Harness ----------------------------------------------------------
 
@@ -259,6 +357,7 @@ public sealed class LiveTradingCycleTests
                 new RiskAwarePositionSizer(),
                 Account,
                 Aggregator,
+                new AlgoTrader.MarketData.LastPriceCache(),
                 Options.Create(new StrategySettings { Timeframe = Timeframe.Minute1 }),
                 Options.Create(new RiskSettings()),
                 Options.Create(new MarketDataSettings { Exchange = "NSE" }),
@@ -273,8 +372,13 @@ public sealed class LiveTradingCycleTests
     {
         public string Name => "TestStrategy";
         public string Version => "1.0.0";
+        public bool OnCloseCalled { get; private set; }
         public Func<StrategyContext, IReadOnlyList<Signal>> OnClose { get; set; } = _ => Array.Empty<Signal>();
-        public IReadOnlyList<Signal> OnCandleClosed(StrategyContext context) => OnClose(context);
+        public IReadOnlyList<Signal> OnCandleClosed(StrategyContext context)
+        {
+            OnCloseCalled = true;
+            return OnClose(context);
+        }
     }
 
     private sealed class ToggleRiskEngine : IRiskEngine
@@ -367,6 +471,9 @@ public sealed class LiveTradingCycleTests
         public Task CancelOrderAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 #pragma warning disable CS0067 // Not raised in these tests.
         public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+        public event EventHandler<EventArgs>? StreamDisconnected;
+        public bool IsConnected => true;
+
 #pragma warning restore CS0067
     }
 
@@ -381,4 +488,62 @@ public sealed class LiveTradingCycleTests
         public Task<IReadOnlyList<Order>> GetOpenOrdersAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<Order>> GetOrdersAsync(DateTimeOffset fromUtc, DateTimeOffset toUtc, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
+
+    // ---- Functional doubles for the restart-safe dedup test (real LiveAccountView) ----
+
+    /// <summary>A functional broker-truth source for the real <see cref="LiveAccountView"/>: reports funds and a
+    /// flat book (no open positions). Order placement is never reached — the in-flight guard precedes it.</summary>
+    private sealed class FunctionalBroker : ITradingBroker
+    {
+        private readonly BrokerFunds _funds;
+        public FunctionalBroker(decimal cash) => _funds = new BrokerFunds(cash, UsedMargin: 0m, AvailableMargin: cash);
+
+        public string ProviderName => "FunctionalBroker";
+        public bool IsAuthenticated => true;
+        public Task<BrokerFunds> GetFundsAsync(CancellationToken cancellationToken = default) => Task.FromResult(_funds);
+        public Task<IReadOnlyList<BrokerPositionSummary>> GetPositionsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<BrokerPositionSummary>>(Array.Empty<BrokerPositionSummary>());
+
+        public Task AuthenticateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<BrokerProfile> GetProfileAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<BrokerHolding>> GetHoldingsAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<BrokerOrderInfo>> GetOrdersAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<BrokerOrderInfo> GetOrderAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<PlaceOrderResult> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<ModifyOrderResult> ModifyOrderAsync(string brokerOrderId, OrderModification modification, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task CancelOrderAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+#pragma warning disable CS0067 // Not raised in these tests.
+        public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+        public event EventHandler<EventArgs>? StreamDisconnected;
+        public bool IsConnected => true;
+
+#pragma warning restore CS0067
+    }
+
+    /// <summary>A durable-store double: <see cref="GetOpenOrdersAsync"/> returns every non-terminal seeded order
+    /// (the EF repository's semantics), so a persisted working order survives a restart and re-derives as in-flight.</summary>
+    private sealed class SeededOrderRepository : IOrderRepository
+    {
+        private readonly List<Order> _orders;
+        public SeededOrderRepository(params Order[] orders) => _orders = orders.ToList();
+
+        public Task<IReadOnlyList<Order>> GetOpenOrdersAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Order>>(_orders.Where(o => !o.State.IsTerminal()).ToList());
+        public Task<IReadOnlyList<Order>> GetOrdersAsync(DateTimeOffset fromUtc, DateTimeOffset toUtc, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Order>>(_orders.Where(o => o.CreatedAtUtc >= fromUtc && o.CreatedAtUtc <= toUtc).ToList());
+
+        public Task<Order> AddAsync(Order order, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task UpdateAsync(Order order, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<Order?> GetByIdAsync(long id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<Order?> GetByBrokerIdAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<Order>> GetByCorrelationIdAsync(string correlationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    /// <summary>Cost model for the real account view; not exercised here (no fills today), returns a zero breakdown.</summary>
+    private sealed class ZeroCostCalculator : ITradingCostCalculator
+    {
+        public TradingCostBreakdown Calculate(CostCalculationContext context) =>
+            new(0m, Stt: 0m, ExchangeTransactionCharges: 0m, SebiCharges: 0m, StampDuty: 0m, Gst: 0m, DpCharges: 0m, OtherCharges: 0m);
+    }
 }
+

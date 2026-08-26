@@ -37,9 +37,7 @@ public class AlgoTraderDbContext : DbContext
     public DbSet<PaperTradeEntity> PaperTrades => Set<PaperTradeEntity>();
     public DbSet<LiveTradeEntity> LiveTrades => Set<LiveTradeEntity>();
 
-    // Orders
     public DbSet<OrderEntity> Orders => Set<OrderEntity>();
-    public DbSet<OrderExecutionEntity> OrderExecutions => Set<OrderExecutionEntity>();
 
     // Portfolio
     public DbSet<PositionEntity> Positions => Set<PositionEntity>();

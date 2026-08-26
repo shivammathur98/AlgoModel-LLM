@@ -230,7 +230,7 @@ public sealed class RiskEngineTests
     // ---- Helpers ----------------------------------------------------------
 
     private static RiskEngine Engine(IKillSwitch? killSwitch = null, RiskSettings? settings = null) =>
-        new(settings ?? new RiskSettings(), killSwitch ?? new FakeKillSwitch(), NullLogger<RiskEngine>.Instance);
+        new(settings ?? new RiskSettings(), killSwitch ?? new FakeKillSwitch(), new AlgoTrader.MarketData.LastPriceCache(), NullLogger<RiskEngine>.Instance);
 
     private static RiskEvaluationContext Ctx(
         DateTimeOffset? timestampUtc = null,

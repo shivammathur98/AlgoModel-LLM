@@ -35,8 +35,25 @@ public sealed record BrokerOrderInfo(
     decimal? AverageFillPrice,
     string? StatusMessage);
 
-/// <summary>Outcome of an order placement attempt.</summary>
-public sealed record PlaceOrderResult(bool IsSuccess, string? BrokerOrderId = null, string? ErrorMessage = null);
+/// <summary>
+/// Outcome of an order placement attempt.
+/// <para>
+/// Three distinct outcomes — never conflate them (§20, Safety Rules #8/#9):
+/// <list type="bullet">
+/// <item><c>IsSuccess=true</c> — the broker accepted the order and returned <see cref="BrokerOrderId"/>.</item>
+/// <item><c>IsSuccess=false, IsUncertain=false</c> — a <b>definitive</b> business rejection (e.g. a 4xx with an
+/// error body): the exchange/RMS refused it and it was NOT placed. Safe to mark terminally Rejected.</item>
+/// <item><c>IsSuccess=false, IsUncertain=true</c> — an <b>ambiguous</b> submission (transport failure, timeout,
+/// 5xx, or a success status whose order id could not be read): the order may or may not be live at the broker.
+/// The caller must NOT assume a non-fill and must NOT blindly retry — reconcile against the broker first.</item>
+/// </list>
+/// </para>
+/// </summary>
+public sealed record PlaceOrderResult(
+    bool IsSuccess,
+    string? BrokerOrderId = null,
+    string? ErrorMessage = null,
+    bool IsUncertain = false);
 
 /// <summary>Outcome of an order modification attempt.</summary>
 public sealed record ModifyOrderResult(bool IsSuccess, string? ErrorMessage = null);

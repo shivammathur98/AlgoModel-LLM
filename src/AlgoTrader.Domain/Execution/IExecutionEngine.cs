@@ -9,8 +9,11 @@ using AlgoTrader.Domain.Orders;
 /// </summary>
 /// <param name="IsAccepted">
 /// True when the order entered the pipeline — routed to the broker (Live) or simulated (Paper/Backtest).
-/// False means the engine refused it (safety gate, disallowed mode, or a broker business rejection); the
-/// reason is in <paramref name="Message"/> and the local order is in a terminal <see cref="OrderState.Rejected"/>.
+/// False means the engine refused it or could not confirm it: a safety gate, a disallowed mode, or a
+/// <b>definitive</b> broker business rejection leaves the local order terminal <see cref="OrderState.Rejected"/>;
+/// an <b>uncertain</b> live submission (transport failure, timeout, 5xx, or an unreadable success) leaves it
+/// terminal <see cref="OrderState.Failed"/> and engages the kill switch (§20, Safety Rules #5/#8/#9). The reason
+/// is in <paramref name="Message"/>.
 /// </param>
 /// <param name="OrderId">Local persisted order id (always assigned, even for rejections, for auditability §28).</param>
 /// <param name="State">The order's state after this submission attempt.</param>

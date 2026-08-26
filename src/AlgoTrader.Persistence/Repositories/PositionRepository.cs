@@ -1,4 +1,4 @@
-namespace AlgoTrader.Persistence.Repositories;
+﻿namespace AlgoTrader.Persistence.Repositories;
 
 using AlgoTrader.Application.Repositories;
 using AlgoTrader.Domain.Portfolio;
@@ -41,6 +41,8 @@ public sealed class PositionRepository : IPositionRepository
         var entity = await _db.Positions.FindAsync(new object[] { id }, cancellationToken)
             ?? throw new InvalidOperationException($"Position {id} not found.");
 
+        _db.Entry(entity).Property(e => e.RowVersion).OriginalValue = position.Version;
+
         entity.Quantity = position.Quantity;
         entity.AveragePrice = position.AveragePrice;
         entity.StopPrice = position.StopPrice;
@@ -59,7 +61,7 @@ public sealed class PositionRepository : IPositionRepository
             .Select(p => new OpenPosition(
                 p.InstrumentToken, p.Symbol, p.StrategyName,
                 p.Quantity, p.AveragePrice, p.OpenedAtUtc,
-                p.StopPrice, p.TargetPrice, p.CorrelationId))
+                p.StopPrice, p.TargetPrice, p.CorrelationId, p.RowVersion))
             .ToListAsync(cancellationToken);
     }
 
@@ -74,8 +76,9 @@ public sealed class PositionRepository : IPositionRepository
         var position = new OpenPosition(
             e.InstrumentToken, e.Symbol, e.StrategyName,
             e.Quantity, e.AveragePrice, e.OpenedAtUtc,
-            e.StopPrice, e.TargetPrice, e.CorrelationId);
+            e.StopPrice, e.TargetPrice, e.CorrelationId, e.RowVersion);
 
         return (position, e.Status, e.RealizedPnl);
     }
 }
+

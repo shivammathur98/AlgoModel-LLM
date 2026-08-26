@@ -1,4 +1,4 @@
-namespace AlgoTrader.Broker.Zerodha;
+﻿namespace AlgoTrader.Broker.Zerodha;
 
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -13,7 +13,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 /// <summary>
-/// Zerodha Kite Connect broker implementation (§4, §5, §7).
+/// Zerodha Kite Connect broker implementation (Â§4, Â§5, Â§7).
 /// Implements both the order-management contract (<see cref="ITradingBroker"/>) and the
 /// historical-data contract (<see cref="IHistoricalDataProvider"/>). Once authenticated it also owns a
 /// <see cref="KiteOrderStream"/> that turns Kite order postbacks into <see cref="OrderUpdated"/> events; the
@@ -31,7 +31,7 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
 
     public string ProviderName => "Zerodha";
     public bool IsAuthenticated => _isAuthenticated;
-    public bool IsConnected => _isAuthenticated;
+    public bool IsConnected => _isAuthenticated && (_orderStream?.IsRunning ?? false);
 
     /// <summary>Raised when the broker pushes an asynchronous order status update (fill, cancel, reject).</summary>
     /// <remarks>
@@ -40,6 +40,7 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
     /// stream lives for the authenticated session and is torn down by <see cref="Dispose"/>.
     /// </remarks>
     public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+    public event EventHandler<EventArgs>? StreamDisconnected;
 
     public ZerodhaKiteBroker(
         HttpClient http,
@@ -68,9 +69,9 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // ITradingBroker
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// <summary>
     /// Validates the configured access token against Kite's /user/profile endpoint.
@@ -90,7 +91,7 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         _isAuthenticated = true;
         _logger.LogInformation("Authenticated with Zerodha Kite Connect");
 
-        // Start the async order-postback channel so fills/cancels/rejects surface as OrderUpdated (§7).
+        // Start the async order-postback channel so fills/cancels/rejects surface as OrderUpdated (Â§7).
         await StartOrderStreamAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -101,12 +102,22 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
     /// </summary>
     private async Task StartOrderStreamAsync(CancellationToken cancellationToken)
     {
-        if (_orderStream is not null) return; // already streaming for this session
+        if (_orderStream is not null)
+        {
+            if (_orderStream.IsRunning) return; // already streaming for this session
+            
+            // Reconnecting a disconnected stream
+            _orderStream.OrderUpdated -= OnStreamOrderUpdated;
+            _orderStream.Disconnected -= OnStreamDisconnected;
+            _orderStream.Dispose();
+            _orderStream = null;
+        }
 
         var stream = new KiteOrderStream(_settings, _logger);
         try
         {
             stream.OrderUpdated += OnStreamOrderUpdated;
+            stream.Disconnected += OnStreamDisconnected;
             await stream.StartAsync(cancellationToken).ConfigureAwait(false);
             _orderStream = stream;
         }
@@ -121,6 +132,7 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
     }
 
     private void OnStreamOrderUpdated(object? sender, BrokerOrderUpdate update) => OrderUpdated?.Invoke(this, update);
+    private void OnStreamDisconnected(object? sender, EventArgs e) => StreamDisconnected?.Invoke(this, e);
 
     public async Task<BrokerProfile> GetProfileAsync(CancellationToken cancellationToken = default)
     {
@@ -277,22 +289,48 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
             if (!response.IsSuccessStatusCode)
             {
                 var msg = ExtractErrorMessage(body);
-                _logger.LogWarning("Order placement failed: {Message}", msg);
-                return new PlaceOrderResult(false, null, msg);
+                // Distinguish a DEFINITIVE rejection from an AMBIGUOUS one (Â§20, Rules #8/#9). A 4xx is the
+                // exchange/RMS refusing the order â€” it was not placed, so it is safe to treat as terminal. A 5xx
+                // (or any other non-success) means the upstream may have received/processed the order before
+                // failing to respond cleanly â€” the order may be live at the broker, so it is UNCERTAIN.
+                var isDefinitiveRejection = (int)response.StatusCode is >= 400 and < 500;
+                if (isDefinitiveRejection)
+                {
+                    _logger.LogWarning("Order placement rejected by broker: {Message}", msg);
+                    return new PlaceOrderResult(false, null, msg);
+                }
+
+                _logger.LogError("Order placement failed with {Status}; UNCERTAIN â€” order may be live at broker: {Message}",
+                    (int)response.StatusCode, msg);
+                return new PlaceOrderResult(false, null, msg, IsUncertain: true);
             }
 
             var json = JsonDocument.Parse(body);
             var orderId = json.RootElement.GetProperty("data").GetProperty("order_id").GetString();
             if (string.IsNullOrEmpty(orderId))
-                return new PlaceOrderResult(false, null, "Order ID not returned");
+            {
+                // A success status means Kite accepted the order, but we could not read its id â€” the order is
+                // live at the broker under an id we did not capture. UNCERTAIN, never a clean rejection.
+                _logger.LogError("Order accepted (HTTP success) but order_id was not readable; UNCERTAIN â€” order is live at broker.");
+                return new PlaceOrderResult(false, null, "Order accepted but order id was not returned.", IsUncertain: true);
+            }
 
             _logger.LogInformation("Order placed: {OrderId}", orderId);
             return new PlaceOrderResult(true, orderId);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Order placement threw");
-            return new PlaceOrderResult(false, null, ex.Message);
+            // Genuine caller cancellation (host shutdown / caller token) â€” propagate; not an order outcome.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // HttpRequestException (connection reset / DNS / socket), a client-side HttpClient TIMEOUT
+            // (TaskCanceledException : OperationCanceledException with our token NOT cancelled), or a malformed
+            // success body: in every case we cannot tell whether the exchange received the order. UNCERTAIN
+            // (Â§20, Rules #8/#9) â€” the caller must reconcile before assuming a non-fill or retrying.
+            _logger.LogError(ex, "Order placement failed ambiguously; UNCERTAIN â€” order may be live at broker.");
+            return new PlaceOrderResult(false, null, ex.Message, IsUncertain: true);
         }
     }
 
@@ -327,6 +365,7 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            _logger.LogError(ex, "Failed to modify broker order {BrokerOrderId}", brokerOrderId);
             return new ModifyOrderResult(false, ex.Message);
         }
     }
@@ -341,9 +380,9 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         response.EnsureSuccessStatusCode();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // IHistoricalDataProvider
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public async Task<IReadOnlyList<Candle>> GetCandlesAsync(
         int instrumentToken,
@@ -392,9 +431,9 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         return result;
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Helpers
-    // ──────────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private void EnsureAuthenticated()
     {
@@ -416,21 +455,21 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         var type = ParseOrderType(o.TryGetProperty("order_type", out var ot) ? ot.GetString() : null);
         var qty = o.TryGetProperty("quantity", out var q) ? q.GetInt32() : 0;
         var price = o.TryGetProperty("price", out var p) && p.ValueKind == JsonValueKind.Number ? (decimal?)p.GetDecimal() : null;
-        var state = ParseOrderState(o.TryGetProperty("status", out var s) ? s.GetString() : null);
         var filled = o.TryGetProperty("filled_quantity", out var fq) ? fq.GetInt32() : 0;
+        var state = ParseOrderState(o.TryGetProperty("status", out var s) ? s.GetString() : null, filled);
         var avgFill = o.TryGetProperty("average_price", out var ap) && ap.ValueKind == JsonValueKind.Number ? (decimal?)ap.GetDecimal() : null;
         var statusMsg = o.TryGetProperty("status_message", out var sm) && sm.ValueKind == JsonValueKind.String ? sm.GetString() : null;
 
         return new BrokerOrderInfo(orderId, symbol, instrumentToken, side, type, qty, price, state, filled, avgFill, statusMsg);
     }
 
-    internal static OrderState ParseOrderState(string? status) => status switch
+    internal static OrderState ParseOrderState(string? status, int filledQuantity = 0) => status switch
     {
         null => OrderState.Pending,
         "COMPLETE" => OrderState.Filled,
         "CANCELLED" => OrderState.Cancelled,
         "REJECTED" => OrderState.Rejected,
-        "OPEN" => OrderState.Open,
+        "OPEN" => filledQuantity > 0 ? OrderState.PartiallyFilled : OrderState.Open,
         "PUT ORDER REQ RECEIVED" or "VALIDATION PENDING" or "OPEN PENDING" or "AMO REQ RECEIVED" or "TRIGGER PENDING" => OrderState.Pending,
         _ => OrderState.Pending,
     };
@@ -522,3 +561,5 @@ public sealed class ZerodhaKiteBroker : ITradingBroker, IHistoricalDataProvider,
         }
     }
 }
+
+

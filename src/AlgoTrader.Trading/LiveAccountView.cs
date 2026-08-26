@@ -88,10 +88,11 @@ public sealed class LiveAccountView : ILiveAccountView
     {
         var sessionDateIst = DateOnly.FromDateTime(asOfUtc.ToOffset(IndiaStandardTimeOffset).DateTime);
 
-        // Only filled orders for today's session and this product carry a realized effect, taken in fill order.
-        var todaysFills = recentOrders
+        // Process all recent fills chronologically to reconstruct open lots correctly,
+        // including overnight positions. We only accrue realized P&L and trade counts
+        // for fills that occurred during today's session.
+        var allFills = recentOrders
             .Where(o => o.Product == product && o.FilledQuantity > 0 && o.FilledAtUtc is not null)
-            .Where(o => DateOnly.FromDateTime(o.FilledAtUtc!.Value.ToOffset(IndiaStandardTimeOffset).DateTime) == sessionDateIst)
             .OrderBy(o => o.FilledAtUtc!.Value)
             .ToList();
 
@@ -99,41 +100,43 @@ public sealed class LiveAccountView : ILiveAccountView
         var trades = 0;
         var openLots = new Dictionary<int, (decimal AvgPrice, int Quantity, decimal EntryCost)>();
 
-        foreach (var order in todaysFills)
+        foreach (var order in allFills)
         {
             var price = order.AverageFillPrice ?? 0m;
             if (price <= 0m)
-                continue; // A fill with no average price cannot be valued; skip it defensively.
+                continue;
+
+            var isToday = DateOnly.FromDateTime(order.FilledAtUtc!.Value.ToOffset(IndiaStandardTimeOffset).DateTime) == sessionDateIst;
 
             if (order.Side == OrderSide.Buy)
             {
-                // Long-only, one lot per instrument, full-quantity exits: a buy opens a lot. A second entry with
-                // no exit between is ignored, not stacked — exactly as the paper ledger's RecordEntryFill behaves.
                 if (openLots.ContainsKey(order.InstrumentToken))
-                    continue;
+                    continue; // Second entry without exit ignored (just like paper ledger)
 
                 var entryCost = _costs.Calculate(new CostCalculationContext(
                     order.Exchange, product, OrderSide.Buy, order.FilledQuantity, price)).Total;
+                
                 openLots[order.InstrumentToken] = (price, order.FilledQuantity, entryCost);
-                trades++; // A "trade today" is a filled entry, exactly as the paper ledger counts it.
+                
+                if (isToday)
+                    trades++; // Only count today's entries against max trades per day
             }
             else if (openLots.Remove(order.InstrumentToken, out var lot))
             {
-                // An exit realizes P&L only over the quantity actually filled (a partial fill closes only part of
-                // the lot), net of both legs' charges. The entry cost is apportioned to the closed quantity; any
-                // remainder stays open at the same average price with its share of the entry cost.
                 var exitQty = Math.Min(order.FilledQuantity, lot.Quantity);
                 var closedEntryCost = lot.Quantity == 0 ? 0m : lot.EntryCost * exitQty / lot.Quantity;
                 var exitCost = _costs.Calculate(new CostCalculationContext(
                     order.Exchange, product, OrderSide.Sell, exitQty, price)).Total;
-                realizedPnl += (price - lot.AvgPrice) * exitQty - closedEntryCost - exitCost;
+                
+                if (isToday)
+                {
+                    realizedPnl += (price - lot.AvgPrice) * exitQty - closedEntryCost - exitCost;
+                }
 
                 var remaining = lot.Quantity - exitQty;
                 if (remaining > 0)
                     openLots[order.InstrumentToken] = (lot.AvgPrice, remaining, lot.EntryCost - closedEntryCost);
             }
-            // A sell with no same-day entry (e.g. an overnight position squared off today) cannot be valued from
-            // today's orders alone; it is left out of today's realized figure rather than guessed at.
         }
 
         return (realizedPnl, trades);

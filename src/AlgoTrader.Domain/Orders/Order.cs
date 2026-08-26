@@ -41,6 +41,9 @@ public class Order : Entity
     public DateTimeOffset LastUpdatedAtUtc { get; set; }
     public DateTimeOffset? FilledAtUtc { get; set; }
 
+    /// <summary>Concurrency token to prevent lost updates.</summary>
+    public byte[]? Version { get; set; }
+
     /// <summary>True once the order has reached a terminal state.</summary>
     public bool IsTerminal => State.IsTerminal();
 

@@ -19,6 +19,7 @@ public sealed class CandleAggregator : ICandleAggregator
     private readonly ILogger<CandleAggregator> _logger;
     private readonly Func<int, (string Symbol, string Exchange)> _symbolResolver;
     private readonly Dictionary<(int Token, Timeframe Timeframe), (Candle Candle, DateTimeOffset NextStartUtc)> _inProgress = new();
+    private readonly Dictionary<(int Token, Timeframe Timeframe), long> _lastCumulativeVolume = new();
     private readonly object _lock = new();
 
     public CandleAggregator(
@@ -44,12 +45,18 @@ public sealed class CandleAggregator : ICandleAggregator
                 // If the tick falls within the current candle, update it.
                 if (tick.TimestampUtc >= current.Candle.TimestampUtc && tick.TimestampUtc < current.NextStartUtc)
                 {
+                    // Kite's tick volume is cumulative for the day (§7). Compute the delta since the last
+                    // tick so the candle carries per-bar volume, not an ever-growing sum of cumulative values.
+                    var previousCumulative = _lastCumulativeVolume.GetValueOrDefault(key);
+                    var deltaVolume = Math.Max(0, tick.Volume - previousCumulative);
+                    _lastCumulativeVolume[key] = tick.Volume;
+
                     var updated = current.Candle with
                     {
                         High = Math.Max(current.Candle.High, tick.LastPrice),
                         Low = Math.Min(current.Candle.Low, tick.LastPrice),
                         Close = tick.LastPrice,
-                        Volume = current.Candle.Volume + tick.Volume
+                        Volume = current.Candle.Volume + deltaVolume
                     };
                     _inProgress[key] = (updated, current.NextStartUtc);
                     return null;
@@ -59,6 +66,12 @@ public sealed class CandleAggregator : ICandleAggregator
                 if (tick.TimestampUtc >= current.NextStartUtc)
                 {
                     var closedCandle = current.Candle;
+
+                    // Delta volume for the first tick of the new bar (Kite volume is cumulative for the day).
+                    var previousCumulative = _lastCumulativeVolume.GetValueOrDefault(key);
+                    var deltaVolume = Math.Max(0, tick.Volume - previousCumulative);
+                    _lastCumulativeVolume[key] = tick.Volume;
+
                     var (symbol, exchange) = _symbolResolver(tick.InstrumentToken);
                     var newCandle = new Candle(
                         InstrumentToken: tick.InstrumentToken,
@@ -70,7 +83,7 @@ public sealed class CandleAggregator : ICandleAggregator
                         High: tick.LastPrice,
                         Low: tick.LastPrice,
                         Close: tick.LastPrice,
-                        Volume: tick.Volume);
+                        Volume: deltaVolume);
 
                     _inProgress[key] = (newCandle, nextCandleStartUtc);
                     _logger.LogDebug("Closed candle {Key} at {Time} (O={O} H={H} L={L} C={C})",
@@ -84,7 +97,10 @@ public sealed class CandleAggregator : ICandleAggregator
                 return null;
             }
 
-            // No current candle — start a new one.
+            // No current candle — start a new one. The first tick establishes the cumulative volume baseline;
+            // the candle starts at volume 0 because we have no prior reference to compute a delta from.
+            _lastCumulativeVolume[key] = tick.Volume;
+
             var (initialSymbol, initialExchange) = _symbolResolver(tick.InstrumentToken);
             var initialCandle = new Candle(
                 InstrumentToken: tick.InstrumentToken,
@@ -96,7 +112,7 @@ public sealed class CandleAggregator : ICandleAggregator
                 High: tick.LastPrice,
                 Low: tick.LastPrice,
                 Close: tick.LastPrice,
-                Volume: tick.Volume);
+                Volume: 0);
 
             _inProgress[key] = (initialCandle, nextCandleStartUtc);
             return null;
@@ -112,6 +128,7 @@ public sealed class CandleAggregator : ICandleAggregator
             foreach (var key in keysToRemove)
             {
                 _inProgress.Remove(key);
+                _lastCumulativeVolume.Remove(key);
             }
             _logger.LogDebug("Reset aggregator for instrument {Token}", instrumentToken);
         }

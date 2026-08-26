@@ -13,7 +13,8 @@ public static class StatusEndpoints
         endpoints.MapGet("/api/status", (ISystemStatusService statusService) =>
             Results.Ok(statusService.GetStatus()))
             .WithName("GetSystemStatus")
-            .WithDescription("Returns current platform mode, safety state, kill switch status, and uptime.");
+            .WithDescription("Returns current platform mode, safety state, kill switch status, and uptime.")
+            .AddEndpointFilter<AlgoTrader.Api.Infrastructure.ApiKeyAuthenticationEndpointFilter>();
 
         return endpoints;
     }

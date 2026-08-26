@@ -208,6 +208,34 @@ public sealed class TradingLoopServiceTests
         await service.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task LiveMode_MarketDataDisconnect_ReconnectsAndResubscribes()
+    {
+        var (service, feed, _) = Build(
+            LiveTrading(), Creds(), Universe("INFY"), new FakeKillSwitch(), new[] { Infy() },
+            configureServices: services =>
+            {
+                services.AddSingleton<ITradingBroker>(new FakeBroker());
+                services.AddSingleton<IOrderRepository>(new FakeOrderRepository());
+            });
+
+        await service.StartAsync(CancellationToken.None);
+
+        // Wait for initial connection
+        while (feed.ConnectCallCount == 0) await Task.Delay(10);
+
+        // Disconnect raises event, which signals the reconnect loop
+        feed.RaiseDisconnect("test drop");
+
+        // Wait for loop to wake up and connect + subscribe again
+        while (feed.ConnectCallCount < 2) await Task.Delay(10);
+
+        feed.ConnectCallCount.Should().BeGreaterThan(1);
+        feed.SubscribedTokens.Should().Contain(111);
+
+        await service.StopAsync(CancellationToken.None);
+    }
+
     // ---- End-of-day reconciliation (§26, §28) ----------------------------
 
     [Fact]
@@ -370,6 +398,7 @@ public sealed class TradingLoopServiceTests
 
     private sealed class NoopPaperTradingCycle : IPaperTradingCycle
     {
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
@@ -379,6 +408,7 @@ public sealed class TradingLoopServiceTests
         public TaskCompletionSource<Tick> Received { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int CallCount => Volatile.Read(ref _callCount);
 
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _callCount);
@@ -444,12 +474,18 @@ public sealed class TradingLoopServiceTests
         }
 
         public void RaiseTick(Tick tick) => TickReceived?.Invoke(this, new TickEventArgs { Tick = tick });
+        
+        public void RaiseDisconnect(string reason) 
+        {
+            IsConnected = false;
+            Disconnected?.Invoke(this, new MarketDataDisconnectedEventArgs { Reason = reason });
+        }
 
         public event EventHandler<TickEventArgs>? TickReceived;
 #pragma warning disable CS0067 // Not exercised in these tests.
         public event EventHandler<MarketDepthEventArgs>? DepthReceived;
-        public event EventHandler<MarketDataDisconnectedEventArgs>? Disconnected;
 #pragma warning restore CS0067
+        public event EventHandler<MarketDataDisconnectedEventArgs>? Disconnected;
     }
 
     private sealed class FakeInstrumentRepository : IInstrumentRepository
@@ -561,7 +597,8 @@ public sealed class TradingLoopServiceTests
         public void RaiseOrderUpdated(BrokerOrderUpdate update) => OrderUpdated?.Invoke(this, update);
 
         public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
-
+        public event EventHandler<EventArgs>? StreamDisconnected;
+        public bool IsConnected => true;
         public Task<BrokerProfile> GetProfileAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BrokerFunds> GetFundsAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<BrokerHolding>> GetHoldingsAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
@@ -573,3 +610,4 @@ public sealed class TradingLoopServiceTests
         public Task CancelOrderAsync(string brokerOrderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
+

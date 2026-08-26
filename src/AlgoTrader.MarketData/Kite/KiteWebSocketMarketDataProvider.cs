@@ -16,7 +16,7 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
 {
     private readonly ILogger<KiteWebSocketMarketDataProvider> _logger;
     private readonly BrokerSettings _settings;
-    private readonly ClientWebSocket _webSocket;
+    private ClientWebSocket _webSocket = null!;
     private readonly CancellationTokenSource _cts;
     private Task? _receiveTask;
     private volatile bool _isConnected;
@@ -28,6 +28,8 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
     public event EventHandler<TickEventArgs>? TickReceived;
     public event EventHandler<MarketDepthEventArgs>? DepthReceived;
     public event EventHandler<MarketDataDisconnectedEventArgs>? Disconnected;
+
+    private readonly HashSet<int> _subscribedTokens = new();
 
     public KiteWebSocketMarketDataProvider(
         ILogger<KiteWebSocketMarketDataProvider> logger,
@@ -54,11 +56,18 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
 
         try
         {
+            _webSocket?.Dispose();
+            _webSocket = new ClientWebSocket();
             await _webSocket.ConnectAsync(new Uri(url), cancellationToken);
             _isConnected = true;
             _logger.LogInformation("Connected to Kite WebSocket");
 
             _receiveTask = ReceiveLoopAsync(_cts.Token);
+
+            if (_subscribedTokens.Count > 0)
+            {
+                await SubscribeInternalAsync(_subscribedTokens.ToList(), cancellationToken);
+            }
         }
         catch (Exception ex)
         {
@@ -69,11 +78,18 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
 
     public async Task SubscribeAsync(IEnumerable<int> instrumentTokens, CancellationToken cancellationToken = default)
     {
-        if (!_isConnected) throw new InvalidOperationException("WebSocket is not connected.");
-
         var tokens = instrumentTokens.ToList();
         if (tokens.Count == 0) return;
 
+        foreach (var t in tokens) _subscribedTokens.Add(t);
+
+        if (!_isConnected) return;
+
+        await SubscribeInternalAsync(tokens, cancellationToken);
+    }
+
+    private async Task SubscribeInternalAsync(List<int> tokens, CancellationToken cancellationToken)
+    {
         // Kite subscribe message: [1, count, ...tokens]
         var message = new byte[4 + tokens.Count * 4];
         BinaryPrimitives.WriteInt32BigEndian(message.AsSpan(0), 1); // message type: subscribe
@@ -89,9 +105,10 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
 
     public async Task UnsubscribeAsync(IEnumerable<int> instrumentTokens, CancellationToken cancellationToken = default)
     {
-        if (!_isConnected) return;
-
         var tokens = instrumentTokens.ToList();
+        foreach (var t in tokens) _subscribedTokens.Remove(t);
+
+        if (!_isConnected) return;
         if (tokens.Count == 0) return;
 
         // Kite unsubscribe message: [2, count, ...tokens]
@@ -177,15 +194,14 @@ public sealed class KiteWebSocketMarketDataProvider : ILiveMarketDataProvider, I
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in WebSocket receive loop");
-            Disconnected?.Invoke(this, new MarketDataDisconnectedEventArgs
-            {
-                Reason = "Receive loop error",
-                Exception = ex
-            });
         }
         finally
         {
             _isConnected = false;
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                Disconnected?.Invoke(this, new MarketDataDisconnectedEventArgs { Reason = "WebSocket closed" });
+            }
         }
     }
 

@@ -20,4 +20,10 @@ public interface IPaperTradingCycle
     /// market condition (an unfillable order, a rejected signal), only surfacing genuinely unexpected faults.
     /// </summary>
     Task OnTickAsync(Tick tick, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Recovers resting simulated orders from the durable store into the in-memory pending ledger.
+    /// Must be called before the first tick is processed to prevent stranding orders across restarts.
+    /// </summary>
+    Task InitializeAsync(CancellationToken cancellationToken = default);
 }

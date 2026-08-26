@@ -7,10 +7,14 @@ using Microsoft.EntityFrameworkCore;
 /// <summary>Open or closed position tracked by the platform.</summary>
 [Table("Positions")]
 [Index(nameof(CorrelationId), IsUnique = true)]
+[Index(nameof(Status))]
 public class PositionEntity
 {
     [Key]
     public long Id { get; set; }
+
+    [Timestamp]
+    public byte[]? RowVersion { get; set; }
 
     public int InstrumentToken { get; set; }
 

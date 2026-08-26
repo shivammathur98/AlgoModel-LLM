@@ -1,4 +1,4 @@
-namespace AlgoTrader.Broker.Zerodha;
+﻿namespace AlgoTrader.Broker.Zerodha;
 
 using System.Net.WebSockets;
 using System.Text;
@@ -9,10 +9,10 @@ using Microsoft.Extensions.Logging;
 
 /// <summary>
 /// Listens for Zerodha Kite order postbacks over the ticker WebSocket (<c>wss://ws.kite.trade</c>) and raises
-/// <see cref="OrderUpdated"/> for each one (§4, §7). Kite delivers order updates as <b>text</b> frames
-/// (<c>{"type":"order","data":{…}}</c>) on the same socket that streams binary ticks; because this stream never
+/// <see cref="OrderUpdated"/> for each one (Â§4, Â§7). Kite delivers order updates as <b>text</b> frames
+/// (<c>{"type":"order","data":{â€¦}}</c>) on the same socket that streams binary ticks; because this stream never
 /// subscribes to any instrument, only order postbacks arrive here. This is the async fill/cancel/reject channel
-/// that <see cref="Domain.Execution.IExecutionEngine.ApplyBrokerUpdateAsync"/> consumes — without it, fills are
+/// that <see cref="Domain.Execution.IExecutionEngine.ApplyBrokerUpdateAsync"/> consumes â€” without it, fills are
 /// only learned at end-of-day reconciliation.
 /// <para>
 /// It is a thin I/O adapter owned by <see cref="ZerodhaKiteBroker"/> for the lifetime of an authenticated
@@ -24,13 +24,15 @@ public sealed class KiteOrderStream : IDisposable
 {
     private readonly BrokerSettings _settings;
     private readonly ILogger _logger;
-    private readonly ClientWebSocket _webSocket;
+    private ClientWebSocket _webSocket = null!;
     private readonly CancellationTokenSource _cts;
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
     /// <summary>Raised once per parsed order postback.</summary>
     public event EventHandler<BrokerOrderUpdate>? OrderUpdated;
+
+    public event EventHandler<EventArgs>? Disconnected;
 
     /// <summary>True once the socket is connected and the receive loop is running.</summary>
     public bool IsRunning => _isRunning;
@@ -39,13 +41,12 @@ public sealed class KiteOrderStream : IDisposable
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _webSocket = new ClientWebSocket();
         _cts = new CancellationTokenSource();
     }
 
     /// <summary>
     /// Connects to the Kite ticker socket and begins listening. Kite pushes order updates for the authenticated
-    /// user automatically — no instrument subscription is sent, so no market-data frames arrive on this socket.
+    /// user automatically â€” no instrument subscription is sent, so no market-data frames arrive on this socket.
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -54,8 +55,11 @@ public sealed class KiteOrderStream : IDisposable
         if (string.IsNullOrWhiteSpace(_settings.ApiKey) || string.IsNullOrWhiteSpace(_settings.AccessToken))
             throw new InvalidOperationException("Broker API key and access token are required for the order stream.");
 
-        // The URL carries the api_key and access_token as query parameters — never log it (§5).
+        // The URL carries the api_key and access_token as query parameters â€” never log it (Â§5).
         var url = $"wss://ws.kite.trade?api_key={_settings.ApiKey}&access_token={_settings.AccessToken}";
+        
+        _webSocket?.Dispose();
+        _webSocket = new ClientWebSocket();
         await _webSocket.ConnectAsync(new Uri(url), cancellationToken).ConfigureAwait(false);
 
         _isRunning = true;
@@ -66,7 +70,7 @@ public sealed class KiteOrderStream : IDisposable
 
     /// <summary>
     /// Maps one raw Kite ticker text frame to a <see cref="BrokerOrderUpdate"/>, or returns null when the frame
-    /// is not an order postback, is malformed, or lacks an order id. Pure — the unit-tested core of this class.
+    /// is not an order postback, is malformed, or lacks an order id. Pure â€” the unit-tested core of this class.
     /// </summary>
     public static BrokerOrderUpdate? TryParseFrame(string json)
     {
@@ -90,7 +94,7 @@ public sealed class KiteOrderStream : IDisposable
                 : null;
             if (string.IsNullOrEmpty(orderId)) return null;
 
-            // Reuse the broker's single source of truth for Kite status → OrderState.
+            // Reuse the broker's single source of truth for Kite status â†’ OrderState.
             var state = ZerodhaKiteBroker.ParseOrderState(
                 data.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null);
 
@@ -101,7 +105,7 @@ public sealed class KiteOrderStream : IDisposable
             decimal? averageFillPrice = data.TryGetProperty("average_price", out var ap) && ap.ValueKind == JsonValueKind.Number
                 ? ap.GetDecimal()
                 : null;
-            // Kite reports average_price 0 for orders with nothing filled; that is "no average", not a ₹0 fill.
+            // Kite reports average_price 0 for orders with nothing filled; that is "no average", not a â‚¹0 fill.
             if (averageFillPrice is 0m && filled == 0) averageFillPrice = null;
 
             var statusMessage = data.TryGetProperty("status_message", out var sm) && sm.ValueKind == JsonValueKind.String
@@ -129,7 +133,7 @@ public sealed class KiteOrderStream : IDisposable
                     break;
                 }
 
-                // Order postbacks are text; we never subscribe to instruments, so binary is unexpected — skip it.
+                // Order postbacks are text; we never subscribe to instruments, so binary is unexpected â€” skip it.
                 if (result.MessageType != WebSocketMessageType.Text)
                     continue;
 
@@ -149,7 +153,7 @@ public sealed class KiteOrderStream : IDisposable
         catch (Exception ex)
         {
             // Disposal cancels the token and tears down the socket, which surfaces here as a WebSocket/disposed
-            // exception rather than OperationCanceledException — that is an expected shutdown, not a real fault.
+            // exception rather than OperationCanceledException â€” that is an expected shutdown, not a real fault.
             if (cancellationToken.IsCancellationRequested || _disposed)
                 _logger.LogDebug("Kite order stream receive loop ended during shutdown.");
             else
@@ -158,6 +162,10 @@ public sealed class KiteOrderStream : IDisposable
         finally
         {
             _isRunning = false;
+            if (!cancellationToken.IsCancellationRequested && !_disposed)
+            {
+                Disconnected?.Invoke(this, EventArgs.Empty);
+            }
         }
     }
 
@@ -170,9 +178,9 @@ public sealed class KiteOrderStream : IDisposable
             return;
         }
 
-        // Order id, state and quantity only — no account credentials or PII (§5).
+        // Order id, state and quantity only â€” no account credentials or PII (Â§5).
         _logger.LogInformation(
-            "Kite order update: {OrderId} → {State} (filled {Filled}).", update.BrokerOrderId, update.State, update.FilledQuantity);
+            "Kite order update: {OrderId} â†’ {State} (filled {Filled}).", update.BrokerOrderId, update.State, update.FilledQuantity);
         OrderUpdated?.Invoke(this, update);
     }
 
@@ -186,3 +194,4 @@ public sealed class KiteOrderStream : IDisposable
         _webSocket.Dispose();
     }
 }
+

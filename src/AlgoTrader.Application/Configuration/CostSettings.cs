@@ -50,9 +50,20 @@ public sealed class CostSettings
     [Range(0.0, 1.0)]
     public decimal SebiChargePercent { get; set; } = 0.000001m;
 
-    /// <summary>Stamp duty on the buy side (0.00003 = 0.003%).</summary>
+    /// <summary>
+    /// Stamp duty on the BUY leg for INTRADAY (MIS) equity (0.00003 = 0.003% = ₹300/crore). Buyer-pays.
+    /// Delivery is charged at the higher <see cref="StampDutyPercentBuyDelivery"/> rate — see that field.
+    /// </summary>
     [Range(0.0, 1.0)]
     public decimal StampDutyPercentBuy { get; set; } = 0.00003m;
+
+    /// <summary>
+    /// Stamp duty on the BUY leg for DELIVERY (CNC) equity (0.00015 = 0.015% = ₹1500/crore). Buyer-pays.
+    /// This is 5× the intraday rate; modelling it separately is essential for honest swing/delivery
+    /// backtests, mirroring the intraday-vs-delivery split already applied to STT.
+    /// </summary>
+    [Range(0.0, 1.0)]
+    public decimal StampDutyPercentBuyDelivery { get; set; } = 0.00015m;
 
     /// <summary>GST applied on brokerage + exchange charges + SEBI charges (0.18 = 18%).</summary>
     [Range(0.0, 1.0)]

@@ -2,9 +2,13 @@ namespace AlgoTrader.Persistence.Entities;
 
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 
 /// <summary>Tradable instrument master data.</summary>
 [Table("Instruments")]
+[Index(nameof(InstrumentToken), IsUnique = true)]
+[Index(nameof(Exchange), nameof(Symbol))]
+[Index(nameof(Exchange), nameof(Segment), nameof(IsTradable))]
 public class InstrumentEntity
 {
     [Key]
